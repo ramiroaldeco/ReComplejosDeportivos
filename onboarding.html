@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>Alta de Complejo (Onboarding)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body{font-family:Segoe UI,Arial,sans-serif;background:#f6f7fb;margin:0}
+    header{background:#0b8457;color:#fff;padding:14px 18px}
+    .wrap{max-width:1000px;margin:20px auto;background:#fff;border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.07);padding:20px}
+    h1,h2{margin:0 0 10px}
+    .grid{display:grid;gap:12px}
+    .g2{grid-template-columns:1fr 1fr}
+    .g3{grid-template-columns:1fr 1fr 1fr}
+    label{font-weight:600}
+    input,textarea,select{width:100%;padding:10px;border:1px solid #e2e5ec;border-radius:8px;background:#fbfbfd}
+    button{background:#0b8457;color:#fff;border:none;padding:10px 16px;border-radius:10px;cursor:pointer}
+    .card{border:1px solid #eee;border-radius:12px;padding:14px;margin:14px 0}
+    .row{display:flex;gap:8px;align-items:center}
+    .pill{display:inline-block;background:#eef2f7;border-radius:999px;padding:4px 10px;margin:2px 6px 2px 0}
+    .ok{color:#0b8457;font-weight:600}
+    .err{color:#b00020;font-weight:600}
+    table{width:100%;border-collapse:collapse}
+    th,td{border:1px solid #e8e8e8;padding:8px;text-align:center}
+    th{background:#0b8457;color:#fff}
+    small{color:#555}
+  </style>
+</head>
+<body>
+  <header><h1>Alta de Complejo</h1></header>
+  <div class="wrap">
+    <div class="card">
+      <h2>1) Identificación</h2>
+      <div class="grid g2">
+        <div>
+          <label>Slug / ID único (sin espacios)</label>
+          <input id="id" placeholder="ej: elbosque, lamasia" />
+          <small>Usá solo letras/números/guiones-bajos. Este ID se usa en todo el sistema.</small>
+        </div>
+        <div>
+          <label>Clave del dueño (para login)</label>
+          <input id="clave" type="password" placeholder="Contraseña del dueño" />
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>2) Datos públicos</h2>
+      <div class="grid g2">
+        <div>
+          <label>Nombre</label>
+          <input id="nombre" placeholder="Complejo El Bosque" />
+        </div>
+        <div>
+          <label>Ciudad</label>
+          <input id="ciudad" placeholder="Hernando, Córdoba" />
+        </div>
+      </div>
+      <div style="margin-top:8px">
+        <label>Mapa (iframe embebido)</label>
+        <textarea id="maps" rows="3" placeholder="Pegar el iframe de Google Maps"></textarea>
+      </div>
+
+      <div style="margin-top:10px">
+        <label>Servicios</label>
+        <div id="servicios" class="row" style="flex-wrap:wrap">
+          <!-- tildás lo que corresponda -->
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>3) Horarios por día</h2>
+      <table>
+        <thead><tr><th>Día</th><th>Desde</th><th>Hasta</th></tr></thead>
+        <tbody id="tbodyHorarios"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>4) Canchas</h2>
+      <div id="canchas"></div>
+      <div style="margin-top:8px"><button onclick="agregarCancha()">+ Agregar cancha</button></div>
+    </div>
+
+    <div class="card">
+      <h2>5) Access Token de Mercado Pago</h2>
+      <div class="grid g2">
+        <div>
+          <label>Access Token (TEST-… o APP_USR-…)</label>
+          <input id="token" placeholder="Pegá aquí el Access Token del dueño" />
+        </div>
+        <div style="display:flex;align-items:end">
+          <button onclick="guardarToken()">Guardar Access Token</button>
+        </div>
+      </div>
+      <small>Nunca se muestra al público. Queda guardado en el backend.</small>
+      <div id="msgToken"></div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <button onclick="guardarDatos()">Guardar datos del complejo</button>
+        <div id="msgDatos"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Resumen (lo que se enviará a <code>datos_complejos.json</code>)</h2>
+      <pre id="preview" style="white-space:pre-wrap;background:#fbfbfd;border:1px solid #eee;padding:10px;border-radius:8px;max-height:260px;overflow:auto"></pre>
+    </div>
+  </div>
+
+<script>
+const backend = "";
+const DIAS = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"];
+const SERVS = ["Duchas","Vestuarios","Quincho","Parrilla","Wifi","Bar","Buffet","Baños","Estacionamiento"];
+
+function opt(h){ const o=document.createElement("option"); o.value=o.textContent=h; return o; }
+
+function armarHorarios() {
+  const tb = document.getElementById("tbodyHorarios");
+  tb.innerHTML = "";
+  for (const d of DIAS) {
+    const tr = document.createElement("tr");
+    const tdDia = document.createElement("td"); tdDia.textContent = d; tr.appendChild(tdDia);
+    const tdDesde = document.createElement("td"); const tdHasta = document.createElement("td");
+    const s1=document.createElement("select"), s2=document.createElement("select");
+    for (let h=0; h<=23; h++) { const hh = String(h).padStart(2,"0")+":00"; s1.appendChild(opt(hh)); s2.appendChild(opt(hh)); }
+    s1.value="18:00"; s2.value="23:00";
+    tdDesde.appendChild(s1); tdHasta.appendChild(s2);
+    tr.appendChild(tdDesde); tr.appendChild(tdHasta);
+    tb.appendChild(tr);
+  }
+}
+
+function armarServicios() {
+  const cont = document.getElementById("servicios");
+  cont.innerHTML = "";
+  for (const s of SERVS) {
+    const label = document.createElement("label"); label.className="pill";
+    const cb = document.createElement("input"); cb.type="checkbox"; cb.value=s;
+    label.appendChild(cb); label.append(" "+s);
+    cont.appendChild(label);
+  }
+}
+
+function agregarCancha(val={}) {
+  const div = document.createElement("div");
+  div.className="card";
+  div.innerHTML = `
+    <div class="grid g3">
+      <div><label>Nombre</label><input class="c-nombre" placeholder="Fútbol 5" value="${val.nombre||""}"></div>
+      <div><label>Precio total</label><input class="c-precioTotal" type="number" min="0" value="${val.precioTotal||""}"></div>
+      <div><label>Precio por jugador</label><input class="c-precioJugador" type="number" min="0" value="${val.precioPorJugador||""}"></div>
+    </div>
+    <div class="grid g3" style="margin-top:8px">
+      <div><label>Jugadores</label><input class="c-jugadores" type="number" min="0" value="${val.jugadores||""}"></div>
+      <div><label>Seña</label><input class="c-senia" type="number" min="0" value="${val.senia||""}"></div>
+      <div style="display:flex;align-items:end"><button type="button" onclick="this.closest('.card').remove()">Eliminar</button></div>
+    </div>`;
+  document.getElementById("canchas").appendChild(div);
+}
+
+function leerCanchas() {
+  const arr = [];
+  document.querySelectorAll("#canchas .card").forEach(card=>{
+    arr.push({
+      nombre: card.querySelector(".c-nombre").value.trim(),
+      precioTotal: card.querySelector(".c-precioTotal").value.trim(),
+      precioPorJugador: card.querySelector(".c-precioJugador").value.trim(),
+      jugadores: card.querySelector(".c-jugadores").value.trim(),
+      senia: card.querySelector(".c-senia").value.trim()
+    });
+  });
+  return arr;
+}
+
+function payloadDatos() {
+  const horarios = {};
+  const trs = document.querySelectorAll("#tbodyHorarios tr");
+  trs.forEach(tr=>{
+    const dia = tr.children[0].textContent;
+    const desde = tr.children[1].querySelector("select").value;
+    const hasta = tr.children[2].querySelector("select").value;
+    horarios[dia] = { desde, hasta };
+  });
+  const servicios = Array.from(document.querySelectorAll("#servicios input:checked")).map(cb=>cb.value);
+
+  return {
+    [document.getElementById("id").value.trim()]: {
+      clave: document.getElementById("clave").value.trim(),
+      nombre: document.getElementById("nombre").value.trim(),
+      ciudad: document.getElementById("ciudad").value.trim(),
+      maps: document.getElementById("maps").value.trim(),
+      servicios,
+      horarios,
+      imagenes: [],
+      canchas: leerCanchas()
+    }
+  };
+}
+
+function refrescarPreview() {
+  const p = payloadDatos();
+  document.getElementById("preview").textContent = JSON.stringify(p, null, 2);
+}
+
+async function guardarDatos() {
+  const id = document.getElementById("id").value.trim();
+  const msg = document.getElementById("msgDatos"); msg.textContent="";
+
+  if (!id) { msg.textContent="Falta el ID"; msg.className="err"; return; }
+
+  const actuales = await fetch("/datos_complejos").then(r=>r.json());
+  const nuevo = payloadDatos();
+  const merged = { ...actuales, ...nuevo };
+
+  await fetch("/guardarDatos", {
+    method:"POST",
+    headers:{ "Content-Type":"application/json" },
+    body: JSON.stringify(merged)
+  });
+
+  msg.textContent = "Datos del complejo guardados ✅"; msg.className="ok";
+}
+
+async function guardarToken() {
+  const id = document.getElementById("id").value.trim();
+  const token = document.getElementById("token").value.trim();
+  const msg = document.getElementById("msgToken"); msg.textContent="";
+
+  if (!id || !token) { msg.textContent="Completá ID y Access Token"; msg.className="err"; return; }
+
+  const r = await fetch("/alta-credencial", {
+    method:"POST",
+    headers:{ "Content-Type":"application/json" },
+    body: JSON.stringify({ id, mp_access_token: token })
+  });
+  const dj = await r.json();
+  if (dj.ok) { msg.textContent = "Access Token guardado ✅"; msg.className="ok"; }
+  else { msg.textContent = dj.error || "No se pudo guardar"; msg.className="err"; }
+}
+
+document.addEventListener("input", e=>{
+  if (["id","clave","nombre","ciudad","maps"].includes(e.target.id)) refrescarPreview();
+});
+document.addEventListener("change", e=>{
+  if (e.target.closest("#servicios") || e.target.closest("#tbodyHorarios")) refrescarPreview();
+});
+
+armarHorarios();
+armarServicios();
+agregarCancha(); // una de ejemplo
+refrescarPreview();
+</script>
+</body>
+</html>

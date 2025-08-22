@@ -1,0 +1,9 @@
+# Dependencias
+node_modules/
+
+# Archivos sensibles
+.env
+credenciales_mp.json
+
+# Archivos temporales
+*.log
