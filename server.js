@@ -4,7 +4,7 @@ const express = require("express");
 const fs = require("fs");
 const path = require("path");
 const cors = require("cors");
-const fetch = require("node-fetch"); // para consultar el pago en el webhook
+const fetch = require("node-fetch"); // para consultar el pago en el webhook y notificaciones
 const { MercadoPagoConfig, Preference } = require("mercadopago");
 
 const app = express();
@@ -38,11 +38,13 @@ if (!fs.existsSync(pathIdx))      escribirJSON(pathIdx, {});
 // ---- Config MP por complejo
 function tokenPara(complejoId) {
   const cred = leerJSON(pathCreds);
-  // 1) Token por complejo (onboarding)
-  if (cred[complejoId]?.access_token) return cred[complejoId].access_token;
+  const c = cred[complejoId] || {};
+  // 1) Token por complejo (onboarding): aceptamos "access_token" o "mp_access_token"
+  if (c.access_token) return c.access_token;
+  if (c.mp_access_token) return c.mp_access_token;
   // 2) Token global .env
   if (process.env.MP_ACCESS_TOKEN) return process.env.MP_ACCESS_TOKEN;
-  // 3) Si no hay, devolvemos cadena vacía (fallará con "invalid_token" como hasta ahora)
+  // 3) Si no hay, devolvemos cadena vacía (fallará con "invalid_token")
   return "";
 }
 function mpClient(complejoId) {
@@ -85,6 +87,20 @@ app.post("/guardarDatos", (req, res) => {
   res.json({ ok: true });
 });
 
+// NUEVA: alta/actualización de credenciales de MP por complejo
+app.post("/alta-credencial", (req, res) => {
+  const { id, mp_access_token, access_token } = req.body || {};
+  if (!id || !(mp_access_token || access_token)) {
+    return res.status(400).json({ error: "Falta id o token" });
+  }
+  const cred = leerJSON(pathCreds);
+  cred[id] = cred[id] || {};
+  // normalizamos a 'access_token' (el server lo busca así)
+  cred[id].access_token = access_token || mp_access_token;
+  escribirJSON(pathCreds, cred);
+  res.json({ ok: true });
+});
+
 // Reservas (objeto completo)
 app.get("/reservas", (_req, res) => {
   res.json(leerJSON(pathReservas));
@@ -117,21 +133,114 @@ app.post("/login", (req, res) => {
 });
 
 // =======================
+// Notificaciones opcionales (WhatsApp Cloud / Resend)
+// =======================
+
+// Enviar WhatsApp usando Meta WhatsApp Cloud API (sin librerías)
+// ENV necesarios:
+//   WHATSAPP_TOKEN, WHATSAPP_PHONE_ID, ADMIN_WHATSAPP_TO (tel en formato internacional, ej: 549351...)
+// Opcional por complejo: en datos_complejos[complejoId].whatsappDueño (si lo guardás ahí)
+async function enviarWhatsApp(complejoId, texto) {
+  const token = process.env.WHATSAPP_TOKEN;
+  const phoneId = process.env.WHATSAPP_PHONE_ID;
+  if (!token || !phoneId) return; // no configurado
+
+  const datos = leerJSON(pathDatos);
+  const para = (datos?.[complejoId]?.whatsappDueño) || process.env.ADMIN_WHATSAPP_TO;
+  if (!para) return;
+
+  const url = `https://graph.facebook.com/v20.0/${phoneId}/messages`;
+  const body = {
+    messaging_product: "whatsapp",
+    to: String(para),
+    type: "text",
+    text: { body: texto }
+  };
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+  } catch (e) {
+    console.error("WhatsApp noti error:", e?.message || e);
+  }
+}
+
+// Enviar email vía Resend API (sin librerías)
+// ENV necesarios:
+//   RESEND_API_KEY, ADMIN_EMAIL, RESEND_FROM (desde un dominio verificado en Resend, ej: "Reservas <noti@tu-dominio.com>")
+async function enviarEmail(complejoId, asunto, html) {
+  const key = process.env.RESEND_API_KEY;
+  const from = process.env.RESEND_FROM;
+  if (!key || !from) return;
+
+  const datos = leerJSON(pathDatos);
+  const para = (datos?.[complejoId]?.emailDueño) || process.env.ADMIN_EMAIL;
+  if (!para) return;
+
+  try {
+    await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${key}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        from,
+        to: [para],
+        subject: asunto,
+        html
+      })
+    });
+  } catch (e) {
+    console.error("Email noti error:", e?.message || e);
+  }
+}
+
+async function notificarAprobado({ clave, complejoId, nombre, telefono, monto }) {
+  const texto = `✅ Nueva reserva confirmada
+Complejo: ${complejoId}
+Turno: ${clave}
+Cliente: ${nombre} (${telefono})
+Seña: $${monto}`;
+
+  const html = `
+    <h2>✅ Nueva reserva confirmada</h2>
+    <p><strong>Complejo:</strong> ${complejoId}</p>
+    <p><strong>Turno:</strong> ${clave}</p>
+    <p><strong>Cliente:</strong> ${nombre} (${telefono})</p>
+    <p><strong>Seña:</strong> $${monto}</p>
+  `;
+
+  await Promise.all([
+    enviarWhatsApp(complejoId, texto),
+    enviarEmail(complejoId, "Nueva reserva confirmada", html)
+  ]);
+}
+
+// =======================
 // PAGOS: crear preferencia + Webhook
 // =======================
 
 // Crea la preferencia y deja un HOLD sobre el turno
 app.post("/crear-preferencia", async (req, res) => {
   const {
-    complejoId,     // slug del complejo
-    clave,          // clave única del turno: `${slug}-${cancha}-${Dia}-{HH:MM}`
-    titulo,         // título del item
-    precio,         // monto de la seña (número)
-    nombre,         // nombre del cliente
-    telefono        // teléfono del cliente
+    complejoId,
+    clave,
+    titulo,
+    precio,     // puede venir o no
+    senia,      // puede venir o no
+    nombre,
+    telefono
   } = req.body || {};
 
-  if (!complejoId || !clave || !precio) {
+  // Aceptar senia o precio indistintamente
+  const monto = Number((precio ?? senia));
+  if (!complejoId || !clave || !monto) {
     return res.status(400).json({ error: "Faltan datos" });
   }
 
@@ -151,7 +260,7 @@ app.post("/crear-preferencia", async (req, res) => {
     nombre: nombre || "",
     telefono: telefono || "",
     complejoId,
-    monto: precio
+    monto
   };
   escribirJSON(pathReservas, reservas);
 
@@ -160,23 +269,22 @@ app.post("/crear-preferencia", async (req, res) => {
   const mp = new MercadoPagoConfig({ access_token: token });
   const preference = new Preference(mp);
 
-  // back_urls (dejamos las tuyas)
-  const success = `http://localhost:${PORT}/reservar-exito.html`;
-  const pending = `http://localhost:${PORT}/reservar-pendiente.html`;
-  const failure = `http://localhost:${PORT}/reservar-error.html`;
+  // URLs de retorno y webhook
+  const FRONT_URL  = process.env.PUBLIC_URL  || `https://ramiroaldeco.github.io/recomplejos-frontend`;
+  const BACK_URL   = process.env.BACKEND_URL || `https://recomplejos-backend.onrender.com`;
+  const success = `${FRONT_URL}/reservar-exito.html`;
+  const pending = `${FRONT_URL}/reservar-pendiente.html`;
+  const failure = `${FRONT_URL}/reservar-error.html`;
 
   try {
     const prefBody = {
       items: [
-        { title: titulo || "Seña de reserva", unit_price: Number(precio), quantity: 1 }
+        { title: titulo || "Seña de reserva", unit_price: monto, quantity: 1 }
       ],
       back_urls: { success, pending, failure },
       auto_return: "approved",
-      notification_url: `${process.env.PUBLIC_URL || `http://localhost:${PORT}`}/webhook-mp`,
-      metadata: {
-        clave,
-        complejoId
-      }
+      notification_url: `${BACK_URL}/webhook-mp`,
+      metadata: { clave, complejoId }
     };
 
     const result = await preference.create({ body: prefBody });
@@ -192,7 +300,10 @@ app.post("/crear-preferencia", async (req, res) => {
     if (r2[clave]) {
       r2[clave].status = "pending";
       r2[clave].preference_id = pref;
-      r2[clave].init_point = result?.init_point || result?.body?.init_point || result?.response?.init_point || "";
+      r2[clave].init_point =
+        result?.init_point ||
+        result?.body?.init_point ||
+        result?.response?.init_point || "";
       r2[clave].holdUntil = holdUntil;
       escribirJSON(pathReservas, r2);
     }
@@ -232,6 +343,7 @@ app.post("/webhook-mp", async (req, res) => {
     if (process.env.MP_ACCESS_TOKEN) tokensATestar.push(process.env.MP_ACCESS_TOKEN);
     for (const k of Object.keys(cred)) {
       if (cred[k]?.access_token) tokensATestar.push(cred[k].access_token);
+      if (cred[k]?.mp_access_token) tokensATestar.push(cred[k].mp_access_token);
     }
     tokensATestar.push(""); // por si no hay nada
 
@@ -252,9 +364,11 @@ app.post("/webhook-mp", async (req, res) => {
 
     // Encontramos la reserva por metadata o por índice pref -> clave
     let clave = pago?.metadata?.clave;
-    if (!clave && prefId) {
+    let complejoId = pago?.metadata?.complejoId;
+    if ((!clave || !complejoId) && prefId) {
       const idx = leerJSON(pathIdx);
-      clave = idx[prefId]?.clave;
+      clave = clave || idx[prefId]?.clave;
+      complejoId = complejoId || idx[prefId]?.complejoId;
     }
     if (!clave) return;
 
@@ -267,6 +381,21 @@ app.post("/webhook-mp", async (req, res) => {
     if (status === "approved") {
       r.status = "approved";
       r.paidAt = Date.now();
+      // Aseguramos datos útiles para notificación
+      r.nombre = r.nombre || "";
+      r.telefono = r.telefono || "";
+      r.complejoId = r.complejoId || complejoId || "";
+      // Notificar (no bloqueante)
+      const infoNoti = {
+        clave,
+        complejoId: r.complejoId,
+        nombre: r.nombre,
+        telefono: r.telefono,
+        monto: r.monto || r.precio || r.senia || ""
+      };
+      escribirJSON(pathReservas, { ...reservas, [clave]: r });
+      notificarAprobado(infoNoti).catch(()=>{});
+      // limpiar hold
       delete r.holdUntil;
     } else if (status === "rejected" || status === "cancelled") {
       // liberar el turno
@@ -275,10 +404,12 @@ app.post("/webhook-mp", async (req, res) => {
       return;
     } else {
       r.status = "pending"; // in_process / pending
+      escribirJSON(pathReservas, { ...reservas, [clave]: r });
+      return;
     }
 
-    reservas[clave] = r;
-    escribirJSON(pathReservas, reservas);
+    // guardar final por si faltaba algo
+    escribirJSON(pathReservas, { ...reservas, [clave]: r });
   } catch (e) {
     console.error("Error en webhook:", e?.message || e);
   }
@@ -290,6 +421,7 @@ app.post("/webhook-mp", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en http://localhost:${PORT}`);
 });
+
 
 
 
