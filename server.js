@@ -416,16 +416,18 @@ app.post("/webhook-mp", async (req, res) => {
 });
 
 // ===== OAuth Mercado Pago: callback =====
-const CREDS_PATH = path.join(__dirname, "credenciales_mp.json");
-function leerCreds() {
-  try { return JSON.parse(fs.readFileSync(CREDS_PATH, "utf8")); }
+
+const CREDS_MP_PATH = path.join(__dirname, "credenciales_mp.json");
+
+function leerCredsMP() {
+  try { return JSON.parse(fs.readFileSync(CREDS_MP_PATH, "utf8")); }
   catch { return {}; }
 }
-function escribirCreds(obj) {
-  fs.writeFileSync(CREDS_PATH, JSON.stringify(obj, null, 2));
+function escribirCredsMP(obj) {
+  fs.writeFileSync(CREDS_MP_PATH, JSON.stringify(obj, null, 2));
 }
 
-// MP redirige acá luego de que el dueño autoriza tu app
+// Callback al que vuelve Mercado Pago con ?code=...&state=complejoId
 app.get("/mp/callback", async (req, res) => {
   const { code, state: complejoId } = req.query;
   if (!code || !complejoId) {
@@ -433,7 +435,6 @@ app.get("/mp/callback", async (req, res) => {
   }
 
   try {
-    // Intercambio code -> tokens
     const r = await fetch("https://api.mercadopago.com/oauth/token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -445,15 +446,14 @@ app.get("/mp/callback", async (req, res) => {
         redirect_uri: process.env.MP_REDIRECT_URI
       })
     });
-    const data = await r.json();
 
+    const data = await r.json();
     if (!r.ok || !data.access_token) {
       console.error("OAuth error:", data);
       return res.status(400).send("❌ No se pudo conectar Mercado Pago.");
     }
 
-    // Guardar por complejoId
-    const creds = leerCreds();
+    const creds = leerCredsMP();
     creds[complejoId] = creds[complejoId] || {};
     creds[complejoId].oauth = {
       access_token: data.access_token,
@@ -461,23 +461,20 @@ app.get("/mp/callback", async (req, res) => {
       user_id: data.user_id,
       updated_at: Date.now()
     };
-    escribirCreds(creds);
+    escribirCredsMP(creds);
 
-    // Mensaje simple (después lo cambiamos por un redirect a tu panel si querés)
     res.send("✅ Mercado Pago conectado. Ya podés cobrar las señas.");
   } catch (e) {
     console.error(e);
     res.status(500).send("❌ Error interno al conectar Mercado Pago.");
   }
 });
-
 // =======================
 // END
 // =======================
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en http://localhost:${PORT}`);
 });
-
 
 
 
