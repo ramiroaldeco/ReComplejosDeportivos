@@ -416,9 +416,6 @@ app.post("/webhook-mp", async (req, res) => {
 });
 
 // ===== OAuth Mercado Pago: callback =====
-const fs = require("fs");
-const path = require("path");
-
 const CREDS_PATH = path.join(__dirname, "credenciales_mp.json");
 function leerCreds() {
   try { return JSON.parse(fs.readFileSync(CREDS_PATH, "utf8")); }
@@ -480,6 +477,7 @@ app.get("/mp/callback", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en http://localhost:${PORT}`);
 });
+
 
 
 
