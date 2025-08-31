@@ -591,12 +591,53 @@ app.get("/mp/callback", async (req, res) => {
     res.status(500).send("❌ Error interno al conectar Mercado Pago.");
   }
 });
+// ---- DEBUG: credenciales guardadas por complejo (NO expone tokens completos)
+app.get("/debug/credenciales", (_req, res) => {
+  try {
+    const cred = leerJSON(pathCreds); // usa tu helper y pathCreds que ya tenés
+    const resumen = {};
+    for (const k of Object.keys(cred)) {
+      const c = cred[k] || {};
+      resumen[k] = {
+        tieneOAuth: !!(c.oauth && c.oauth.access_token),
+        tieneManual: !!(c.access_token || c.mp_access_token),
+        ultimoUpdate: c.oauth?.updated_at || null
+      };
+    }
+    res.json({ ok: true, credenciales: resumen });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
+// ---- DEBUG: qué token usaría para un complejo (solo preview)
+app.get("/debug/token", (req, res) => {
+  const { complejoId } = req.query || {};
+  if (!complejoId) return res.status(400).json({ error: "falta complejoId" });
+  const cred = leerJSON(pathCreds);
+  const c = cred[complejoId] || {};
+  const tok =
+    c.oauth?.access_token ||
+    c.access_token ||
+    c.mp_access_token ||
+    process.env.MP_ACCESS_TOKEN ||
+    "";
+  return res.json({
+    complejoId,
+    tieneOAuth: !!c.oauth?.access_token,
+    tieneManual: !!(c.access_token || c.mp_access_token),
+    usaEnv: !c.oauth?.access_token && !c.access_token && !c.mp_access_token && !!process.env.MP_ACCESS_TOKEN,
+    token_preview: tok ? tok.slice(0, 8) + "..." + tok.slice(-4) : "(vacío)"
+  });
+});
+
 // =======================
 // END
 // =======================
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en http://localhost:${PORT}`);
 });
+
 
 
 
