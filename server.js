@@ -39,7 +39,9 @@ if (!fs.existsSync(pathIdx))      escribirJSON(pathIdx, {});
 function tokenPara(complejoId) {
   const cred = leerJSON(pathCreds);
   const c = cred[complejoId] || {};
-  // 1) Token por complejo (onboarding): aceptamos "access_token" o "mp_access_token"
+  // 0) Token OAuth (nuevo): priorizarlo
+  if (c.oauth && c.oauth.access_token) return c.oauth.access_token; // <--
+  // 1) Token por complejo (onboarding manual)
   if (c.access_token) return c.access_token;
   if (c.mp_access_token) return c.mp_access_token;
   // 2) Token global .env
@@ -136,10 +138,6 @@ app.post("/login", (req, res) => {
 // Notificaciones opcionales (WhatsApp Cloud / Resend)
 // =======================
 
-// Enviar WhatsApp usando Meta WhatsApp Cloud API (sin librerías)
-// ENV necesarios:
-//   WHATSAPP_TOKEN, WHATSAPP_PHONE_ID, ADMIN_WHATSAPP_TO (tel en formato internacional, ej: 549351...)
-// Opcional por complejo: en datos_complejos[complejoId].whatsappDueño (si lo guardás ahí)
 async function enviarWhatsApp(complejoId, texto) {
   const token = process.env.WHATSAPP_TOKEN;
   const phoneId = process.env.WHATSAPP_PHONE_ID;
@@ -170,9 +168,6 @@ async function enviarWhatsApp(complejoId, texto) {
   }
 }
 
-// Enviar email vía Resend API (sin librerías)
-// ENV necesarios:
-//   RESEND_API_KEY, ADMIN_EMAIL, RESEND_FROM (desde un dominio verificado en Resend, ej: "Reservas <noti@tu-dominio.com>")
 async function enviarEmail(complejoId, asunto, html) {
   const key = process.env.RESEND_API_KEY;
   const from = process.env.RESEND_FROM;
@@ -342,8 +337,9 @@ app.post("/webhook-mp", async (req, res) => {
     const cred = leerJSON(pathCreds);
     if (process.env.MP_ACCESS_TOKEN) tokensATestar.push(process.env.MP_ACCESS_TOKEN);
     for (const k of Object.keys(cred)) {
-      if (cred[k]?.access_token) tokensATestar.push(cred[k].access_token);
-      if (cred[k]?.mp_access_token) tokensATestar.push(cred[k].mp_access_token);
+      if (cred[k]?.oauth?.access_token) tokensATestar.push(cred[k].oauth.access_token); // <-- OAuth primero
+      if (cred[k]?.access_token)        tokensATestar.push(cred[k].access_token);
+      if (cred[k]?.mp_access_token)     tokensATestar.push(cred[k].mp_access_token);
     }
     tokensATestar.push(""); // por si no hay nada
 
@@ -415,17 +411,43 @@ app.post("/webhook-mp", async (req, res) => {
   }
 });
 
-// ===== OAuth Mercado Pago: callback =====
+// ===== OAuth Mercado Pago: callback / conectar / estado =====
+// ⚠️ IMPORTANTE: dejá estas rutas ANTES de app.listen(...) y de cualquier middleware 404
 
-const CREDS_MP_PATH = path.join(__dirname, "credenciales_mp.json");
-
-function leerCredsMP() {
-  try { return JSON.parse(fs.readFileSync(CREDS_MP_PATH, "utf8")); }
+// Helpers con nombres únicos para evitar colisiones
+const CREDS_MP_PATH_OAUTH = path.join(__dirname, "credenciales_mp.json");
+function leerCredsMP_OAUTH() {
+  try { return JSON.parse(fs.readFileSync(CREDS_MP_PATH_OAUTH, "utf8")); }
   catch { return {}; }
 }
-function escribirCredsMP(obj) {
-  fs.writeFileSync(CREDS_MP_PATH, JSON.stringify(obj, null, 2));
+function escribirCredsMP_OAUTH(obj) {
+  fs.writeFileSync(CREDS_MP_PATH_OAUTH, JSON.stringify(obj, null, 2));
 }
+
+// Redirige al dueño a autorizar tu app (state = complejoId)
+app.get("/mp/conectar", (req, res) => {
+  const { complejoId } = req.query;
+  if (!complejoId) return res.status(400).send("Falta complejoId");
+  
+  const u = new URL("https://auth.mercadopago.com/authorization");
+  u.searchParams.set("response_type", "code");
+  u.searchParams.set("client_id", process.env.MP_CLIENT_ID);
+  u.searchParams.set("redirect_uri", process.env.MP_REDIRECT_URI);
+  u.searchParams.set("state", complejoId);
+  u.searchParams.set("scope", "offline_access read write"); // refresh + APIs
+
+  res.redirect(u.toString());
+});
+
+// Estado de conexión para pintar UI (conectado / no)
+app.get("/mp/estado", (req, res) => {
+  const { complejoId } = req.query;
+  if (!complejoId) return res.status(400).json({ ok:false, error:"Falta complejoId" });
+
+  const creds = leerCredsMP_OAUTH();
+  const conectado = Boolean(creds[complejoId]?.oauth?.access_token);
+  res.json({ ok:true, conectado });
+});
 
 // Callback al que vuelve Mercado Pago con ?code=...&state=complejoId
 app.get("/mp/callback", async (req, res) => {
@@ -453,7 +475,7 @@ app.get("/mp/callback", async (req, res) => {
       return res.status(400).send("❌ No se pudo conectar Mercado Pago.");
     }
 
-    const creds = leerCredsMP();
+    const creds = leerCredsMP_OAUTH();
     creds[complejoId] = creds[complejoId] || {};
     creds[complejoId].oauth = {
       access_token: data.access_token,
@@ -461,7 +483,7 @@ app.get("/mp/callback", async (req, res) => {
       user_id: data.user_id,
       updated_at: Date.now()
     };
-    escribirCredsMP(creds);
+    escribirCredsMP_OAUTH(creds);
 
     res.send("✅ Mercado Pago conectado. Ya podés cobrar las señas.");
   } catch (e) {
