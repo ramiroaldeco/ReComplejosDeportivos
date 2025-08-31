@@ -383,11 +383,23 @@ app.post("/crear-preferencia", async (req, res) => {
 
   } catch (err) {
     // Si falla la creación, liberar el HOLD para que otro pueda intentar
-    delete reservas[clave];
-    escribirJSON(pathReservas, reservas);
+    const rr = leerJSON(pathReservas);
+    delete rr[clave];
+    escribirJSON(pathReservas, rr);
 
-    // Podés loguear err.message y err.cause para depurar
-    return res.status(502).json({ error: "No se pudo crear la preferencia en Mercado Pago" });
+    // Log más claro (Render logs)
+    console.error("MP error crear-preferencia:", {
+      message: err?.message,
+      body: err?.body || err?.response || err
+    });
+
+    // Intentar extraer detalle útil de la respuesta de MP
+    const detalle =
+      (err?.body && (err.body.message || err.body.error || (Array.isArray(err.body.cause) && err.body.cause[0]?.description))) ||
+      err?.message ||
+      "Error creando preferencia";
+
+    return res.status(400).json({ error: detalle });
   }
 });
 
@@ -653,7 +665,42 @@ app.get("/mp/callback", async (req, res) => {
     };
     escribirCredsMP_OAUTH(creds);
 
-    res.send("✅ Mercado Pago conectado. Ya podés cobrar las señas.");
+  // ... dentro de /mp/callback
+  // después de escribirCredsMP_OAUTH(creds);
+
+  const slug = encodeURIComponent(complejoId);
+  const base = process.env.PUBLIC_URL; // ej: https://ramiroaldeco.github.io/recomplejos-frontend
+  const urlOnboarding = `${base}/onboarding.html?complejo=${slug}&mp=ok`;
+  const urlFrontend   = `${base}/frontend.html?complejo=${slug}`;
+
+  res.status(200).send(`<!doctype html>
+<html lang="es"><head>
+<meta charset="utf-8">
+<title>Mercado Pago conectado</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body{font-family:system-ui,Segoe UI,Arial,sans-serif;padding:28px;background:#f7fff9}
+  .card{max-width:620px;margin:0 auto;background:#fff;border-radius:12px;padding:24px;
+        box-shadow:0 4px 16px rgba(0,0,0,.08);text-align:center}
+  h1{color:#0a7f46;margin:0 0 8px}
+  p{color:#333}
+  .row{display:flex;gap:12px;justify-content:center;margin-top:18px;flex-wrap:wrap}
+  a.button{display:inline-block;padding:10px 14px;border-radius:8px;text-decoration:none}
+  a.primary{background:#0b8457;color:#fff}
+  a.secondary{background:#eef7f2;color:#0b8457;border:1px solid #0b8457}
+  small{color:#666;display:block;margin-top:14px}
+</style>
+</head><body>
+  <div class="card">
+    <h1>✅ Mercado Pago conectado</h1>
+    <p>Listo. Ya podés cobrar las señas para <strong>${complejoId}</strong>.</p>
+    <div class="row">
+      <a class="button primary"   href="${urlOnboarding}">Volver al Onboarding</a>
+      <a class="button secondary" href="${urlFrontend}">Ir a Reservar</a>
+    </div>
+    <small>No olvides guardar los datos del complejo en el Onboarding.</small>
+  </div>
+</body></html>`);
   } catch (e) {
     console.error(e);
     res.status(500).send("❌ Error interno al conectar Mercado Pago.");
@@ -707,6 +754,7 @@ app.get("/debug/token", (req, res) => {
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en http://localhost:${PORT}`);
 });
+
 
 
 
