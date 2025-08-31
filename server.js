@@ -36,24 +36,22 @@ if (!fs.existsSync(pathCreds))    escribirJSON(pathCreds, {});
 if (!fs.existsSync(pathIdx))      escribirJSON(pathIdx, {});
 
 // ---- Config MP por complejo
+// ---- Config MP por complejo (SOLO OAuth)
 function tokenPara(complejoId) {
   const cred = leerJSON(pathCreds);
   const c = cred[complejoId] || {};
-  // 0) OAuth (lo que guarda /mp/callback)
-  if (c.oauth?.access_token) return c.oauth.access_token;
-  // 1) Token manual del onboarding
-  if (c.access_token)        return c.access_token;
-  if (c.mp_access_token)     return c.mp_access_token;
-  // 2) Token global de .env (fallback)
-  if (process.env.MP_ACCESS_TOKEN) return process.env.MP_ACCESS_TOKEN;
-  // 3) Si no hay nada, devolvemos vacío (MP responderá invalid_token)
-  return "";
+  const tok = c.oauth?.access_token;     // solo OAuth
+  if (!tok) {
+    const err = new Error(`El complejo ${complejoId} no tiene Mercado Pago conectado (OAuth).`);
+    err.code = "NO_OAUTH";
+    throw err;
+  }
+  return tok;
 }
 
 function mpClient(complejoId) {
   return new MercadoPagoConfig({ access_token: tokenPara(complejoId) });
 }
-
 // =======================
 // PARCHE AGREGADO (refresh + retry si invalid_token)
 // =======================
@@ -283,7 +281,10 @@ Seña: $${monto}`;
 // PAGOS: crear preferencia + Webhook
 // =======================
 
-// Crea la preferencia y deja un HOLD sobre el turno
+// =======================
+// PAGOS: crear preferencia + Webhook (SOLO OAuth)
+// =======================
+
 app.post("/crear-preferencia", async (req, res) => {
   const {
     complejoId,
@@ -303,13 +304,13 @@ app.post("/crear-preferencia", async (req, res) => {
 
   const reservas = leerJSON(pathReservas);
 
-  // ¿ya reservado?
+  // ¿ya reservado? (aprobado o con HOLD vigente)
   const existente = reservas[clave];
   if (existente && (existente.status === "approved" || estaHoldActiva(existente))) {
     return res.status(409).json({ error: "El turno ya está tomado" });
   }
 
-  // Crear HOLD temporal para bloquear el turno
+  // HOLD temporal para bloquear el turno mientras se crea la preferencia
   const holdUntil = Date.now() + HOLD_MIN * 60 * 1000;
   reservas[clave] = {
     status: "hold",
@@ -321,6 +322,74 @@ app.post("/crear-preferencia", async (req, res) => {
   };
   escribirJSON(pathReservas, reservas);
 
+  // 1) Chequear que el complejo tenga OAuth (tokenPara ahora tira error si falta)
+  let mpConfig;
+  try {
+    // Si tenés helper mpClient(complejoId) que usa tokenPara, podés usarlo:
+    // mpConfig = mpClient(complejoId);
+    // O crear el config directo con el token OAuth del dueño:
+    const tokenDeDueno = tokenPara(complejoId);
+    mpConfig = new MercadoPagoConfig({ access_token: tokenDeDueno });
+  } catch (e) {
+    // Liberar HOLD si el complejo no tiene OAuth
+    delete reservas[clave];
+    escribirJSON(pathReservas, reservas);
+
+    if (e.code === "NO_OAUTH") {
+      return res.status(409).json({
+        error: "Este complejo aún no conectó su Mercado Pago. Pedile al dueño que toque 'Conectar Mercado Pago'."
+      });
+    }
+    return res.status(500).json({ error: "Error obteniendo credenciales del dueño" });
+  }
+
+  // 2) Crear preferencia SIEMPRE con el token OAuth del dueño
+  try {
+    const preference = new Preference(mpConfig);
+    const result = await preference.create({
+      body: {
+        items: [{
+          title: titulo || "Seña de reserva",
+          unit_price: monto,
+          quantity: 1
+        }],
+        back_urls: {
+          success: `${process.env.PUBLIC_URL}/reservar-exito.html`,
+          pending: `${process.env.PUBLIC_URL}/reservar-pendiente.html`,
+          failure: `${process.env.PUBLIC_URL}/reservar-error.html`
+        },
+        auto_return: "approved",
+        notification_url: `${process.env.BACKEND_URL}/webhook-mp`,
+        metadata: { clave, complejoId, nombre: nombre || "", telefono: telefono || "" }
+      }
+    });
+
+    // Guardar datos de la preferencia en la reserva
+    reservas[clave] = {
+      ...reservas[clave],
+      status: "hold",                  // se mantiene en HOLD hasta el webhook
+      preference_id: result.id,
+      init_point: result.init_point,
+      sandbox_init_point: result.sandbox_init_point || null,
+      created_at: Date.now()
+    };
+    escribirJSON(pathReservas, reservas);
+
+    // Devolver al frontend lo necesario para redirigir al pago
+    return res.json({
+      preference_id: result.id,
+      init_point: result.init_point
+    });
+
+  } catch (err) {
+    // Si falla la creación, liberar el HOLD para que otro pueda intentar
+    delete reservas[clave];
+    escribirJSON(pathReservas, reservas);
+
+    // Podés loguear err.message y err.cause para depurar
+    return res.status(502).json({ error: "No se pudo crear la preferencia en Mercado Pago" });
+  }
+});
   // URLs de retorno y webhook
   const FRONT_URL  = process.env.PUBLIC_URL  || `https://ramiroaldeco.github.io/recomplejos-frontend`;
   const BACK_URL   = process.env.BACKEND_URL || `https://recomplejos-backend.onrender.com`;
@@ -637,6 +706,7 @@ app.get("/debug/token", (req, res) => {
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en http://localhost:${PORT}`);
 });
+
 
 
 
