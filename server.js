@@ -390,6 +390,13 @@ app.post("/crear-preferencia", async (req, res) => {
     return res.status(502).json({ error: "No se pudo crear la preferencia en Mercado Pago" });
   }
 });
+
+/* ============================================================
+   LEGADO (backup): tu flujo anterior con retry/refresh
+   Lo dejo envuelto en una función async para evitar await top-level.
+   NO se llama desde ningún lado; solo queda por si querés volver.
+   ============================================================ */
+async function _legacyCrearPreferencia({ complejoId, clave, titulo, monto, holdUntil }) {
   // URLs de retorno y webhook
   const FRONT_URL  = process.env.PUBLIC_URL  || `https://ramiroaldeco.github.io/recomplejos-frontend`;
   const BACK_URL   = process.env.BACKEND_URL || `https://recomplejos-backend.onrender.com`;
@@ -449,7 +456,7 @@ app.post("/crear-preferencia", async (req, res) => {
 
         const info = err2?.message || "Error creando preferencia";
         console.error("MP error tras refresh:", info);
-        return res.status(400).json({ error: info });
+        return { ok:false, error: info };
       }
     } else {
       // Error que no es invalid_token: liberar HOLD y salir
@@ -459,7 +466,7 @@ app.post("/crear-preferencia", async (req, res) => {
 
       const info = err1?.message || "Error creando preferencia";
       console.error("MP error:", info);
-      return res.status(400).json({ error: info });
+      return { ok:false, error: info };
     }
   }
 
@@ -480,21 +487,13 @@ app.post("/crear-preferencia", async (req, res) => {
       escribirJSON(pathReservas, r2);
     }
 
-    return res.json({
-      ok: true,
-      preference_id: pref,
-      init_point: initPoint || null
-    });
+    return { ok:true, preference_id: pref, init_point: initPoint || null };
   } catch (err) {
     // si algo rompe acá, igualmente la preferencia existe; solo logueamos
     console.error("Post-crear-preferencia error:", err?.message || err);
-    return res.json({
-      ok: true,
-      preference_id: pref,
-      init_point: initPoint || null
-    });
+    return { ok:true, preference_id: pref, init_point: initPoint || null };
   }
-});
+}
 
 // Webhook de Mercado Pago
 app.post("/webhook-mp", async (req, res) => {
@@ -696,7 +695,7 @@ app.get("/debug/token", (req, res) => {
     tieneOAuth: !!c.oauth?.access_token,
     tieneManual: !!(c.access_token || c.mp_access_token),
     usaEnv: !c.oauth?.access_token && !c.access_token && !c.mp_access_token && !!process.env.MP_ACCESS_TOKEN,
-    token_preview: tok ? tok.slice(0, 8) + "..." + tok.slice(-4) : "(vacío)"
+    token_preview: tok ? tok.slice(0, 8) + "..." + tok.slice(-4) : "(vacío)
   });
 });
 
@@ -706,6 +705,8 @@ app.get("/debug/token", (req, res) => {
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en http://localhost:${PORT}`);
 });
+
+
 
 
 
