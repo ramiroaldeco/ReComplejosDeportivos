@@ -1,4 +1,3 @@
-<!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="UTF-8" />
@@ -24,18 +23,21 @@
     th,td{border:1px solid #e8e8e8;padding:8px;text-align:center}
     th{background:#0b8457;color:#fff}
     small{color:#555}
+    pre{white-space:pre-wrap;background:#fbfbfd;border:1px solid #eee;padding:10px;border-radius:8px;max-height:260px;overflow:auto}
   </style>
 </head>
 <body>
   <header><h1>Alta de Complejo</h1></header>
+
   <div class="wrap">
+    <!-- 1) Identificación -->
     <div class="card">
       <h2>1) Identificación</h2>
       <div class="grid g2">
         <div>
           <label>Slug / ID único (sin espacios)</label>
           <input id="id" placeholder="ej: elbosque, lamasia" />
-          <small>Usá solo letras/números/guiones-bajos. Este ID se usa en todo el sistema.</small>
+          <small>Usá solo letras, números, guiones y guion bajo. Este ID se usa en todo el sistema.</small>
         </div>
         <div>
           <label>Clave del dueño (para login)</label>
@@ -44,6 +46,7 @@
       </div>
     </div>
 
+    <!-- 2) Datos públicos -->
     <div class="card">
       <h2>2) Datos públicos</h2>
       <div class="grid g2">
@@ -63,12 +66,11 @@
 
       <div style="margin-top:10px">
         <label>Servicios</label>
-        <div id="servicios" class="row" style="flex-wrap:wrap">
-          <!-- tildás lo que corresponda -->
-        </div>
+        <div id="servicios" class="row" style="flex-wrap:wrap"></div>
       </div>
     </div>
 
+    <!-- 3) Horarios -->
     <div class="card">
       <h2>3) Horarios por día</h2>
       <table>
@@ -77,12 +79,14 @@
       </table>
     </div>
 
+    <!-- 4) Canchas -->
     <div class="card">
       <h2>4) Canchas</h2>
       <div id="canchas"></div>
-      <div style="margin-top:8px"><button onclick="agregarCancha()">+ Agregar cancha</button></div>
+      <div style="margin-top:8px"><button type="button" onclick="agregarCancha()">+ Agregar cancha</button></div>
     </div>
 
+    <!-- 5) Credencial MP (manual, la mantenemos) -->
     <div class="card">
       <h2>5) Access Token de Mercado Pago</h2>
       <div class="grid g2">
@@ -91,31 +95,60 @@
           <input id="token" placeholder="Pegá aquí el Access Token del dueño" />
         </div>
         <div style="display:flex;align-items:end">
-          <button onclick="guardarToken()">Guardar Access Token</button>
+          <button type="button" onclick="guardarToken()">Guardar Access Token</button>
         </div>
       </div>
       <small>Nunca se muestra al público. Queda guardado en el backend.</small>
       <div id="msgToken"></div>
     </div>
 
+    <!-- 5.b) Conexión OAuth MP (nuevo) -->
+<div class="card">
+  <h2>5.b) Conectar con Mercado Pago (OAuth)</h2>
+  <p id="mpEstado">Chequeando estado...</p>
+  <div class="row">
+    <button id="btnConectar" type="button" style="display:none" onclick="conectarMP()">Conectar con Mercado Pago</button>
+    <button id="btnProbarMP" type="button" style="display:none" onclick="probarCobro()">Probar cobro $10</button>
+  </div>
+  <small>Recomendado. No te pedimos claves ni tokens: autorizás desde Mercado Pago y podés revocar cuando quieras.</small>
+</div>
+    <!-- 6) Contacto del dueño (para notificaciones) -->
+    <div class="card">
+      <h2>6) Contacto del dueño (opcional, recomendado)</h2>
+      <div class="grid g2">
+        <div>
+          <label>Email del dueño</label>
+          <input id="emailDueño" type="email" placeholder="dueno@ejemplo.com">
+        </div>
+        <div>
+          <label>WhatsApp del dueño (con país, ej. 549351xxxxxxx)</label>
+          <input id="whatsappDueño" type="tel" placeholder="549351XXXXXXX">
+        </div>
+      </div>
+      <small>Si los completás, el sistema puede enviarle notificaciones cuando se confirme una reserva.</small>
+    </div>
+
+    <!-- Guardar datos -->
     <div class="card">
       <div class="row">
-        <button onclick="guardarDatos()">Guardar datos del complejo</button>
+        <button type="button" onclick="guardarDatos()">Guardar datos del complejo</button>
         <div id="msgDatos"></div>
       </div>
     </div>
 
+    <!-- Resumen -->
     <div class="card">
       <h2>Resumen (lo que se enviará a <code>datos_complejos.json</code>)</h2>
-      <pre id="preview" style="white-space:pre-wrap;background:#fbfbfd;border:1px solid #eee;padding:10px;border-radius:8px;max-height:260px;overflow:auto"></pre>
+      <pre id="preview"></pre>
     </div>
   </div>
 
 <script>
-const backend = "";
+const backend = "https://recomplejos-backend.onrender.com";
 const DIAS = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"];
 const SERVS = ["Duchas","Vestuarios","Quincho","Parrilla","Wifi","Bar","Buffet","Baños","Estacionamiento"];
 
+// Helpers UI
 function opt(h){ const o=document.createElement("option"); o.value=o.textContent=h; return o; }
 
 function armarHorarios() {
@@ -157,7 +190,7 @@ function agregarCancha(val={}) {
     <div class="grid g3" style="margin-top:8px">
       <div><label>Jugadores</label><input class="c-jugadores" type="number" min="0" value="${val.jugadores||""}"></div>
       <div><label>Seña</label><input class="c-senia" type="number" min="0" value="${val.senia||""}"></div>
-      <div style="display:flex;align-items:end"><button type="button" onclick="this.closest('.card').remove()">Eliminar</button></div>
+      <div style="display:flex;align-items:end"><button type="button" onclick="this.closest('.card').remove(); refrescarPreview();">Eliminar</button></div>
     </div>`;
   document.getElementById("canchas").appendChild(div);
 }
@@ -176,6 +209,11 @@ function leerCanchas() {
   return arr;
 }
 
+function validarSlug(id) {
+  // letras, números, guiones y guion_bajo
+  return /^[a-zA-Z0-9_-]+$/.test(id);
+}
+
 function payloadDatos() {
   const horarios = {};
   const trs = document.querySelectorAll("#tbodyHorarios tr");
@@ -187,8 +225,10 @@ function payloadDatos() {
   });
   const servicios = Array.from(document.querySelectorAll("#servicios input:checked")).map(cb=>cb.value);
 
+  const id = document.getElementById("id").value.trim();
+
   return {
-    [document.getElementById("id").value.trim()]: {
+    [id]: {
       clave: document.getElementById("clave").value.trim(),
       nombre: document.getElementById("nombre").value.trim(),
       ciudad: document.getElementById("ciudad").value.trim(),
@@ -196,7 +236,10 @@ function payloadDatos() {
       servicios,
       horarios,
       imagenes: [],
-      canchas: leerCanchas()
+      canchas: leerCanchas(),
+      // NUEVO: contacto del dueño
+      emailDueño: document.getElementById("emailDueño")?.value.trim() || "",
+      whatsappDueño: document.getElementById("whatsappDueño")?.value.trim() || ""
     }
   };
 }
@@ -206,53 +249,132 @@ function refrescarPreview() {
   document.getElementById("preview").textContent = JSON.stringify(p, null, 2);
 }
 
+// --- Guardar datos del complejo ---
+async function idDisponible(id) {
+  const actuales = await fetch(`${backend}/datos_complejos`).then(r => r.json());
+  return !actuales[id];
+}
+
 async function guardarDatos() {
   const id = document.getElementById("id").value.trim();
-  const msg = document.getElementById("msgDatos"); msg.textContent="";
+  const msg = document.getElementById("msgDatos"); 
+  msg.textContent = ""; msg.className = "";
 
-  if (!id) { msg.textContent="Falta el ID"; msg.className="err"; return; }
+  if (!id) { msg.textContent = "Falta el ID"; msg.className = "err"; return; }
+  if (!validarSlug(id)) { msg.textContent = "ID inválido. Usá solo letras, números, - y _"; msg.className = "err"; return; }
 
-  const actuales = await fetch("/datos_complejos").then(r=>r.json());
+  // Verificar que no exista
+  if (!(await idDisponible(id))) { msg.textContent = "Ese ID ya existe"; msg.className = "err"; return; }
+
+  // Traigo actuales
+  const actuales = await fetch(`${backend}/datos_complejos`).then(r => r.json());
+  // Nuevo payload
   const nuevo = payloadDatos();
+  // Merge y guardo
   const merged = { ...actuales, ...nuevo };
 
-  await fetch("/guardarDatos", {
-    method:"POST",
-    headers:{ "Content-Type":"application/json" },
+  await fetch(`${backend}/guardarDatos`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(merged)
   });
 
-  msg.textContent = "Datos del complejo guardados ✅"; msg.className="ok";
+  msg.textContent = "Datos del complejo guardados ✅";
+  msg.className = "ok";
+
+  // Guardar localmente el ID para la sección OAuth
+  localStorage.setItem("complejoId", id);
+  pintarEstadoMP();
 }
 
+// --- Guardar token de MP (manual, lo mantenemos) ---
 async function guardarToken() {
   const id = document.getElementById("id").value.trim();
   const token = document.getElementById("token").value.trim();
-  const msg = document.getElementById("msgToken"); msg.textContent="";
+  const msg = document.getElementById("msgToken"); 
+  msg.textContent = ""; msg.className = "";
 
-  if (!id || !token) { msg.textContent="Completá ID y Access Token"; msg.className="err"; return; }
+  if (!id || !token) {
+    msg.textContent = "Completá ID y Access Token";
+    msg.className = "err";
+    return;
+  }
 
-  const r = await fetch("/alta-credencial", {
-    method:"POST",
-    headers:{ "Content-Type":"application/json" },
+  const r = await fetch(`${backend}/alta-credencial`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id, mp_access_token: token })
   });
+
   const dj = await r.json();
-  if (dj.ok) { msg.textContent = "Access Token guardado ✅"; msg.className="ok"; }
-  else { msg.textContent = dj.error || "No se pudo guardar"; msg.className="err"; }
+  if (dj.ok) {
+    msg.textContent = "Access Token guardado ✅";
+    msg.className = "ok";
+  } else {
+    msg.textContent = dj.error || "No se pudo guardar";
+    msg.className = "err";
+  }
 }
 
-document.addEventListener("input", e=>{
-  if (["id","clave","nombre","ciudad","maps"].includes(e.target.id)) refrescarPreview();
-});
-document.addEventListener("change", e=>{
-  if (e.target.closest("#servicios") || e.target.closest("#tbodyHorarios")) refrescarPreview();
-});
+/* ======= Pagos (Mercado Pago) - OAuth ======= */
 
-armarHorarios();
-armarServicios();
-agregarCancha(); // una de ejemplo
-refrescarPreview();
+// Detectar ID del complejo desde #id o localStorage
+function getComplejoId() {
+  const v = document.querySelector("#id")?.value?.trim() || localStorage.getItem("complejoId") || "";
+  return v;
+}
+
+async function pintarEstadoMP() {
+  const complejoId = getComplejoId();
+  const estadoEl = document.getElementById("mpEstado");
+  const btnCon = document.getElementById("btnConectar");
+  const btnTest = document.getElementById("btnProbarMP");
+  if (!estadoEl || !btnCon || !btnTest) return;
+
+  if (!complejoId) {
+    estadoEl.textContent = "Primero completá el ID/slug del complejo.";
+    btnCon.style.display = "none";
+    btnTest.style.display = "none";
+    return;
+  }
+  try {
+    const r = await fetch(`${backend}/mp/estado?complejoId=${encodeURIComponent(complejoId)}`);
+    const dj = await r.json();
+    if (dj.ok && dj.conectado) {
+      estadoEl.textContent = "🟢 Mercado Pago conectado";
+      btnCon.style.display = "none";
+      btnTest.style.display = "inline-block";     // <-- mostrar test
+    } else {
+      estadoEl.textContent = "🔴 Mercado Pago NO conectado";
+      btnCon.style.display = "inline-block";
+      btnTest.style.display = "none";
+    }
+  } catch {
+    estadoEl.textContent = "No se pudo chequear el estado de MP.";
+    btnCon.style.display = "inline-block";
+    btnTest.style.display = "none";
+  }
+}
+function conectarMP() {
+  const complejoId = getComplejoId();
+  if (!complejoId) return alert("Completá el ID/slug del complejo primero.");
+  localStorage.setItem("complejoId", complejoId);
+  window.location.href = `${backend}/mp/conectar?complejoId=${encodeURIComponent(complejoId)}`;
+}
+<button id="btnConectarMP">Conectar Mercado Pago</button>
+<span id="estadoMP"></span>
+<script>
+const backend = "https://recomplejos-backend.onrender.com";
+const complejoId = new URLSearchParams(location.search).get("complejo") || "prueba3";
+
+async function pintarEstado() {
+  const r = await fetch(`${backend}/mp/estado?complejoId=${encodeURIComponent(complejoId)}`);
+  const j = await r.json();
+  document.getElementById('estadoMP').textContent = j.conectado ? "Conectado ✅" : "No conectado ❌";
+}
+document.getElementById('btnConectarMP').onclick = () => {
+  location.href = `${backend}/mp/conectar?complejoId=${encodeURIComponent(complejoId)}`;
+};
+pintarEstado();
 </script>
-</body>
-</html>
+
