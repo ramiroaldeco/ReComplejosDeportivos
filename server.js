@@ -682,20 +682,22 @@ app.get("/debug/credenciales", (_req, res) => {
 app.get("/debug/token", (req, res) => {
   const { complejoId } = req.query || {};
   if (!complejoId) return res.status(400).json({ error: "falta complejoId" });
+
   const cred = leerJSON(pathCreds);
   const c = cred[complejoId] || {};
   const tok =
-    c.oauth?.access_token ||
+    (c.oauth && c.oauth.access_token) ||
     c.access_token ||
     c.mp_access_token ||
     process.env.MP_ACCESS_TOKEN ||
     "";
+
   return res.json({
     complejoId,
-    tieneOAuth: !!c.oauth?.access_token,
+    tieneOAuth: !!(c.oauth && c.oauth.access_token),
     tieneManual: !!(c.access_token || c.mp_access_token),
-    usaEnv: !c.oauth?.access_token && !c.access_token && !c.mp_access_token && !!process.env.MP_ACCESS_TOKEN,
-    token_preview: tok ? tok.slice(0, 8) + "..." + tok.slice(-4) : "(vacío)
+    usaEnv: !((c.oauth && c.oauth.access_token) || c.access_token || c.mp_access_token) && !!process.env.MP_ACCESS_TOKEN,
+    token_preview: tok ? (tok.slice(0, 8) + "..." + tok.slice(-4)) : "(vacío)"
   });
 });
 
@@ -705,6 +707,7 @@ app.get("/debug/token", (req, res) => {
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en http://localhost:${PORT}`);
 });
+
 
 
 
