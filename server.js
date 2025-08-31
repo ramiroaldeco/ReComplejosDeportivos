@@ -39,20 +39,20 @@ if (!fs.existsSync(pathIdx))      escribirJSON(pathIdx, {});
 function tokenPara(complejoId) {
   const cred = leerJSON(pathCreds);
   const c = cred[complejoId] || {};
-  // 0) Token OAuth (nuevo): priorizarlo
-  if (c.oauth && c.oauth.access_token) return c.oauth.access_token; // <--
-  // 1) Token por complejo (onboarding manual)
-  if (c.access_token) return c.access_token;
-  if (c.mp_access_token) return c.mp_access_token;
-  // 2) Token global .env
+  // 0) OAuth (lo que guarda /mp/callback)
+  if (c.oauth?.access_token) return c.oauth.access_token;
+  // 1) Token manual del onboarding
+  if (c.access_token)        return c.access_token;
+  if (c.mp_access_token)     return c.mp_access_token;
+  // 2) Token global de .env (fallback)
   if (process.env.MP_ACCESS_TOKEN) return process.env.MP_ACCESS_TOKEN;
-  // 3) Si no hay, devolvemos cadena vacía (fallará con "invalid_token")
+  // 3) Si no hay nada, devolvemos vacío (MP responderá invalid_token)
   return "";
 }
+
 function mpClient(complejoId) {
   return new MercadoPagoConfig({ access_token: tokenPara(complejoId) });
 }
-
 // ---- Anti doble-reserva: HOLD
 const HOLD_MIN = parseInt(process.env.HOLD_MIN || "10", 10); // 10 min default
 
@@ -497,6 +497,7 @@ app.get("/mp/callback", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en http://localhost:${PORT}`);
 });
+
 
 
 
