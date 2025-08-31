@@ -53,6 +53,68 @@ function tokenPara(complejoId) {
 function mpClient(complejoId) {
   return new MercadoPagoConfig({ access_token: tokenPara(complejoId) });
 }
+
+// =======================
+// PARCHE AGREGADO (refresh + retry si invalid_token)
+// =======================
+
+// Helpers con nombres únicos para evitar colisiones
+const CREDS_MP_PATH_OAUTH = path.join(__dirname, "credenciales_mp.json");
+function leerCredsMP_OAUTH() {
+  try { return JSON.parse(fs.readFileSync(CREDS_MP_PATH_OAUTH, "utf8")); }
+  catch { return {}; }
+}
+function escribirCredsMP_OAUTH(obj) {
+  fs.writeFileSync(CREDS_MP_PATH_OAUTH, JSON.stringify(obj, null, 2));
+}
+
+// Detecta si el error devuelto por el SDK/HTTP es por token inválido
+function isInvalidTokenError(err) {
+  const m1 = (err && err.message || "").toLowerCase();
+  const m2 = (err && err.response && (err.response.data?.message || err.response.body?.message) || "").toLowerCase();
+  const m3 = (err && err.cause && String(err.cause).toLowerCase()) || "";
+  return m1.includes("unauthorized") || m2.includes("invalid_token") || m3.includes("invalid_token");
+}
+
+// Refresca el token OAuth del complejo (si tiene refresh_token guardado)
+async function refreshOAuthToken(complejoId) {
+  const creds = leerCredsMP_OAUTH();
+  const c = creds[complejoId] || {};
+  const refresh_token = c?.oauth?.refresh_token;
+
+  if (!refresh_token) throw new Error("No hay refresh_token para refrescar");
+
+  const body = {
+    grant_type: "refresh_token",
+    refresh_token,
+    client_id: process.env.MP_CLIENT_ID,
+    client_secret: process.env.MP_CLIENT_SECRET,
+  };
+
+  const r = await fetch("https://api.mercadopago.com/oauth/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  const j = await r.json();
+  if (!r.ok || !j.access_token) {
+    throw new Error("No se pudo refrescar el token OAuth de Mercado Pago");
+  }
+
+  // Persistimos los nuevos tokens
+  creds[complejoId] = creds[complejoId] || {};
+  creds[complejoId].oauth = {
+    access_token: j.access_token,
+    refresh_token: j.refresh_token || c.oauth?.refresh_token,
+    user_id: j.user_id ?? c.oauth?.user_id,
+    updated_at: Date.now()
+  };
+  escribirCredsMP_OAUTH(creds);
+
+  return j.access_token;
+}
+
 // ---- Anti doble-reserva: HOLD
 const HOLD_MIN = parseInt(process.env.HOLD_MIN || "10", 10); // 10 min default
 
@@ -259,11 +321,6 @@ app.post("/crear-preferencia", async (req, res) => {
   };
   escribirJSON(pathReservas, reservas);
 
-  // Preferencia MP
-  const token = tokenPara(complejoId);
-  const mp = new MercadoPagoConfig({ access_token: token });
-  const preference = new Preference(mp);
-
   // URLs de retorno y webhook
   const FRONT_URL  = process.env.PUBLIC_URL  || `https://ramiroaldeco.github.io/recomplejos-frontend`;
   const BACK_URL   = process.env.BACKEND_URL || `https://recomplejos-backend.onrender.com`;
@@ -271,20 +328,74 @@ app.post("/crear-preferencia", async (req, res) => {
   const pending = `${FRONT_URL}/reservar-pendiente.html`;
   const failure = `${FRONT_URL}/reservar-error.html`;
 
+  // Armado de preferencia (reutilizable en retry)
+  const prefBody = {
+    items: [
+      { title: titulo || "Seña de reserva", unit_price: monto, quantity: 1 }
+    ],
+    back_urls: { success, pending, failure },
+    auto_return: "approved",
+    notification_url: `${BACK_URL}/webhook-mp`,
+    metadata: { clave, complejoId }
+  };
+
+  let result;
+  let pref;
+  let initPoint = "";
+
+  // Intento 1 con el token actual del complejo
   try {
-    const prefBody = {
-      items: [
-        { title: titulo || "Seña de reserva", unit_price: monto, quantity: 1 }
-      ],
-      back_urls: { success, pending, failure },
-      auto_return: "approved",
-      notification_url: `${BACK_URL}/webhook-mp`,
-      metadata: { clave, complejoId }
-    };
+    const tokenActual = tokenPara(complejoId);
+    const mp = new MercadoPagoConfig({ access_token: tokenActual });
+    const preference = new Preference(mp);
+    result = await preference.create({ body: prefBody });
 
-    const result = await preference.create({ body: prefBody });
-    const pref = result?.id || result?.body?.id || result?.response?.id;
+    pref = result?.id || result?.body?.id || result?.response?.id;
+    initPoint =
+      result?.init_point ||
+      result?.body?.init_point ||
+      result?.response?.init_point || "";
 
+  } catch (err1) {
+    // Si el error es por invalid_token y tenemos refresh_token, refrescamos y reintentamos UNA vez
+    if (isInvalidTokenError(err1)) {
+      try {
+        const nuevoToken = await refreshOAuthToken(complejoId);
+        const mp2 = new MercadoPagoConfig({ access_token: nuevoToken });
+        const preference2 = new Preference(mp2);
+        const r2 = await preference2.create({ body: prefBody });
+
+        result = r2;
+        pref = r2?.id || r2?.body?.id || r2?.response?.id;
+        initPoint =
+          r2?.init_point ||
+          r2?.body?.init_point ||
+          r2?.response?.init_point || "";
+
+      } catch (err2) {
+        // si falló MP aún después del refresh, liberamos el HOLD y devolvemos error
+        const rr = leerJSON(pathReservas);
+        delete rr[clave];
+        escribirJSON(pathReservas, rr);
+
+        const info = err2?.message || "Error creando preferencia";
+        console.error("MP error tras refresh:", info);
+        return res.status(400).json({ error: info });
+      }
+    } else {
+      // Error que no es invalid_token: liberar HOLD y salir
+      const rr = leerJSON(pathReservas);
+      delete rr[clave];
+      escribirJSON(pathReservas, rr);
+
+      const info = err1?.message || "Error creando preferencia";
+      console.error("MP error:", info);
+      return res.status(400).json({ error: info });
+    }
+  }
+
+  // Si llegamos acá, hay pref creada
+  try {
     // indexamos preference -> clave (para el webhook)
     const idx = leerJSON(pathIdx);
     idx[pref] = { clave, complejoId };
@@ -295,10 +406,7 @@ app.post("/crear-preferencia", async (req, res) => {
     if (r2[clave]) {
       r2[clave].status = "pending";
       r2[clave].preference_id = pref;
-      r2[clave].init_point =
-        result?.init_point ||
-        result?.body?.init_point ||
-        result?.response?.init_point || "";
+      r2[clave].init_point = initPoint || "";
       r2[clave].holdUntil = holdUntil;
       escribirJSON(pathReservas, r2);
     }
@@ -306,17 +414,16 @@ app.post("/crear-preferencia", async (req, res) => {
     return res.json({
       ok: true,
       preference_id: pref,
-      init_point: r2[clave]?.init_point || null
+      init_point: initPoint || null
     });
   } catch (err) {
-    // si falló MP, liberamos el HOLD
-    const rr = leerJSON(pathReservas);
-    delete rr[clave];
-    escribirJSON(pathReservas, rr);
-
-    const info = err?.message || "Error creando preferencia";
-    console.error("MP error:", info);
-    return res.status(400).json({ error: info });
+    // si algo rompe acá, igualmente la preferencia existe; solo logueamos
+    console.error("Post-crear-preferencia error:", err?.message || err);
+    return res.json({
+      ok: true,
+      preference_id: pref,
+      init_point: initPoint || null
+    });
   }
 });
 
@@ -415,14 +522,7 @@ app.post("/webhook-mp", async (req, res) => {
 // ⚠️ IMPORTANTE: dejá estas rutas ANTES de app.listen(...) y de cualquier middleware 404
 
 // Helpers con nombres únicos para evitar colisiones
-const CREDS_MP_PATH_OAUTH = path.join(__dirname, "credenciales_mp.json");
-function leerCredsMP_OAUTH() {
-  try { return JSON.parse(fs.readFileSync(CREDS_MP_PATH_OAUTH, "utf8")); }
-  catch { return {}; }
-}
-function escribirCredsMP_OAUTH(obj) {
-  fs.writeFileSync(CREDS_MP_PATH_OAUTH, JSON.stringify(obj, null, 2));
-}
+// (ya definidos arriba como CREDS_MP_PATH_OAUTH / leerCredsMP_OAUTH / escribirCredsMP_OAUTH)
 
 // Redirige al dueño a autorizar tu app (state = complejoId)
 app.get("/mp/conectar", (req, res) => {
@@ -497,6 +597,8 @@ app.get("/mp/callback", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en http://localhost:${PORT}`);
 });
+
+
 
 
 
