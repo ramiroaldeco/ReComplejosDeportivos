@@ -1,3 +1,4 @@
+<!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="UTF-8" />
@@ -377,4 +378,60 @@ document.getElementById('btnConectarMP').onclick = () => {
 };
 pintarEstado();
 </script>
+
+async function probarCobro() {
+  const complejoId = getComplejoId();
+  if (!complejoId) return alert("Completá el ID/slug del complejo primero.");
+
+  try {
+    const r = await fetch(`${backend}/crear-preferencia`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        complejoId,
+        clave: `test-${Date.now()}`,   // clave ficticia para la prueba
+        titulo: "Prueba de seña",
+        precio: 10,                    // $10 de prueba
+        nombre: "Prueba",
+        telefono: "000"
+      })
+    });
+    const dj = await r.json();
+    if (dj?.init_point) {
+      // Te llevo al checkout de MP
+      window.location.href = dj.init_point;
+    } else {
+      console.log(dj);
+      alert("No se pudo generar la preferencia de prueba.");
+    }
+  } catch (e) {
+    console.error(e);
+    alert("Error creando preferencia de prueba.");
+  }
+}
+// --- Listeners para refrescar preview en vivo ---
+document.addEventListener("input", e=>{
+  if (["id","clave","nombre","ciudad","maps","emailDueño","whatsappDueño"].includes(e.target.id)) {
+    refrescarPreview();
+    if (e.target.id === "id") {
+      localStorage.setItem("complejoId", e.target.value.trim());
+      pintarEstadoMP();
+    }
+  }
+});
+document.addEventListener("change", e=>{
+  if (e.target.closest("#servicios") || e.target.closest("#tbodyHorarios") || e.target.closest("#canchas")) refrescarPreview();
+});
+document.getElementById("canchas").addEventListener("input", refrescarPreview);
+
+// Init
+armarHorarios();
+armarServicios();
+agregarCancha(); // una de ejemplo
+refrescarPreview();
+window.addEventListener("load", pintarEstadoMP);
+</script>
+</body>
+</html>
+
 
