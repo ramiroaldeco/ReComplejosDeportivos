@@ -5,8 +5,9 @@
   <title>Alta de Complejo (Onboarding)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
+    :root{--prim:#0b8457}
     body{font-family:Segoe UI,Arial,sans-serif;background:#f6f7fb;margin:0}
-    header{background:#0b8457;color:#fff;padding:14px 18px}
+    header{background:var(--prim);color:#fff;padding:14px 18px}
     .wrap{max-width:1000px;margin:20px auto;background:#fff;border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.07);padding:20px}
     h1,h2{margin:0 0 10px}
     .grid{display:grid;gap:12px}
@@ -14,15 +15,15 @@
     .g3{grid-template-columns:1fr 1fr 1fr}
     label{font-weight:600}
     input,textarea,select{width:100%;padding:10px;border:1px solid #e2e5ec;border-radius:8px;background:#fbfbfd}
-    button{background:#0b8457;color:#fff;border:none;padding:10px 16px;border-radius:10px;cursor:pointer}
+    button{background:var(--prim);color:#fff;border:none;padding:10px 16px;border-radius:10px;cursor:pointer}
     .card{border:1px solid #eee;border-radius:12px;padding:14px;margin:14px 0}
-    .row{display:flex;gap:8px;align-items:center}
+    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
     .pill{display:inline-block;background:#eef2f7;border-radius:999px;padding:4px 10px;margin:2px 6px 2px 0}
     .ok{color:#0b8457;font-weight:600}
     .err{color:#b00020;font-weight:600}
     table{width:100%;border-collapse:collapse}
     th,td{border:1px solid #e8e8e8;padding:8px;text-align:center}
-    th{background:#0b8457;color:#fff}
+    th{background:var(--prim);color:#fff}
     small{color:#555}
     pre{white-space:pre-wrap;background:#fbfbfd;border:1px solid #eee;padding:10px;border-radius:8px;max-height:260px;overflow:auto}
   </style>
@@ -67,7 +68,7 @@
 
       <div style="margin-top:10px">
         <label>Servicios</label>
-        <div id="servicios" class="row" style="flex-wrap:wrap"></div>
+        <div id="servicios" class="row"></div>
       </div>
     </div>
 
@@ -84,35 +85,23 @@
     <div class="card">
       <h2>4) Canchas</h2>
       <div id="canchas"></div>
-      <div style="margin-top:8px"><button type="button" onclick="agregarCancha()">+ Agregar cancha</button></div>
+      <div style="margin-top:8px"><button type="button" id="btnAgregarCancha">+ Agregar cancha</button></div>
     </div>
 
-    <!-- 5) Credencial MP (manual, la mantenemos) -->
+    <!-- 5) Conexión con Mercado Pago (OAuth) -->
     <div class="card">
-      <h2>5) Access Token de Mercado Pago</h2>
-      <div class="grid g2">
-        <div>
-          <label>Access Token (TEST-… o APP_USR-…)</label>
-          <input id="token" placeholder="Pegá aquí el Access Token del dueño" />
-        </div>
-        <div style="display:flex;align-items:end">
-          <button type="button" onclick="guardarToken()">Guardar Access Token</button>
-        </div>
+      <h2>5) Conectar con Mercado Pago (OAuth)</h2>
+      <p id="mpEstado">Chequeando estado...</p>
+      <div class="row">
+        <button id="btnConectar" type="button" style="display:none">Conectar con Mercado Pago</button>
+        <button id="btnProbarMP" type="button" style="display:none">Probar cobro $10</button>
       </div>
-      <small>Nunca se muestra al público. Queda guardado en el backend.</small>
-      <div id="msgToken"></div>
+      <small>
+        Recomendado: no te pedimos claves ni tokens. Autorizás desde Mercado Pago y podrás revocar cuando quieras.
+        La seña que paguen tus clientes va directo a tu cuenta.
+      </small>
     </div>
 
-    <!-- 5.b) Conexión OAuth MP (nuevo) -->
-<div class="card">
-  <h2>5.b) Conectar con Mercado Pago (OAuth)</h2>
-  <p id="mpEstado">Chequeando estado...</p>
-  <div class="row">
-    <button id="btnConectar" type="button" style="display:none" onclick="conectarMP()">Conectar con Mercado Pago</button>
-    <button id="btnProbarMP" type="button" style="display:none" onclick="probarCobro()">Probar cobro $10</button>
-  </div>
-  <small>Recomendado. No te pedimos claves ni tokens: autorizás desde Mercado Pago y podés revocar cuando quieras.</small>
-</div>
     <!-- 6) Contacto del dueño (para notificaciones) -->
     <div class="card">
       <h2>6) Contacto del dueño (opcional, recomendado)</h2>
@@ -126,13 +115,13 @@
           <input id="whatsappDueño" type="tel" placeholder="549351XXXXXXX">
         </div>
       </div>
-      <small>Si los completás, el sistema puede enviarle notificaciones cuando se confirme una reserva.</small>
+      <small>Si los completás, el sistema puede enviarte notificaciones cuando se confirme una reserva.</small>
     </div>
 
     <!-- Guardar datos -->
     <div class="card">
       <div class="row">
-        <button type="button" onclick="guardarDatos()">Guardar datos del complejo</button>
+        <button type="button" id="btnGuardar">Guardar datos del complejo</button>
         <div id="msgDatos"></div>
       </div>
     </div>
@@ -145,16 +134,19 @@
   </div>
 
 <script>
+/* ====== CONFIG ====== */
 const backend = "https://recomplejos-backend.onrender.com";
+
+/* ====== CONSTANTES UI ====== */
 const DIAS = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"];
 const SERVS = ["Duchas","Vestuarios","Quincho","Parrilla","Wifi","Bar","Buffet","Baños","Estacionamiento"];
 
-// Helpers UI
+/* ====== HELPERS UI ====== */
+const $ = sel => document.querySelector(sel);
 function opt(h){ const o=document.createElement("option"); o.value=o.textContent=h; return o; }
 
 function armarHorarios() {
-  const tb = document.getElementById("tbodyHorarios");
-  tb.innerHTML = "";
+  const tb = $("#tbodyHorarios"); tb.innerHTML = "";
   for (const d of DIAS) {
     const tr = document.createElement("tr");
     const tdDia = document.createElement("td"); tdDia.textContent = d; tr.appendChild(tdDia);
@@ -169,8 +161,7 @@ function armarHorarios() {
 }
 
 function armarServicios() {
-  const cont = document.getElementById("servicios");
-  cont.innerHTML = "";
+  const cont = $("#servicios"); cont.innerHTML = "";
   for (const s of SERVS) {
     const label = document.createElement("label"); label.className="pill";
     const cb = document.createElement("input"); cb.type="checkbox"; cb.value=s;
@@ -191,9 +182,10 @@ function agregarCancha(val={}) {
     <div class="grid g3" style="margin-top:8px">
       <div><label>Jugadores</label><input class="c-jugadores" type="number" min="0" value="${val.jugadores||""}"></div>
       <div><label>Seña</label><input class="c-senia" type="number" min="0" value="${val.senia||""}"></div>
-      <div style="display:flex;align-items:end"><button type="button" onclick="this.closest('.card').remove(); refrescarPreview();">Eliminar</button></div>
+      <div style="display:flex;align-items:end"><button type="button" class="btnEliminar">Eliminar</button></div>
     </div>`;
-  document.getElementById("canchas").appendChild(div);
+  $("#canchas").appendChild(div);
+  div.querySelector(".btnEliminar").onclick = () => { div.remove(); refrescarPreview(); };
 }
 
 function leerCanchas() {
@@ -211,67 +203,58 @@ function leerCanchas() {
 }
 
 function validarSlug(id) {
-  // letras, números, guiones y guion_bajo
   return /^[a-zA-Z0-9_-]+$/.test(id);
 }
 
 function payloadDatos() {
   const horarios = {};
-  const trs = document.querySelectorAll("#tbodyHorarios tr");
-  trs.forEach(tr=>{
+  document.querySelectorAll("#tbodyHorarios tr").forEach(tr=>{
     const dia = tr.children[0].textContent;
     const desde = tr.children[1].querySelector("select").value;
     const hasta = tr.children[2].querySelector("select").value;
     horarios[dia] = { desde, hasta };
   });
   const servicios = Array.from(document.querySelectorAll("#servicios input:checked")).map(cb=>cb.value);
-
-  const id = document.getElementById("id").value.trim();
+  const id = $("#id").value.trim();
 
   return {
     [id]: {
-      clave: document.getElementById("clave").value.trim(),
-      nombre: document.getElementById("nombre").value.trim(),
-      ciudad: document.getElementById("ciudad").value.trim(),
-      maps: document.getElementById("maps").value.trim(),
+      clave: $("#clave").value.trim(),
+      nombre: $("#nombre").value.trim(),
+      ciudad: $("#ciudad").value.trim(),
+      maps: $("#maps").value.trim(),
       servicios,
       horarios,
       imagenes: [],
       canchas: leerCanchas(),
-      // NUEVO: contacto del dueño
-      emailDueño: document.getElementById("emailDueño")?.value.trim() || "",
-      whatsappDueño: document.getElementById("whatsappDueño")?.value.trim() || ""
+      emailDueño: $("#emailDueño")?.value.trim() || "",
+      whatsappDueño: $("#whatsappDueño")?.value.trim() || ""
     }
   };
 }
 
 function refrescarPreview() {
-  const p = payloadDatos();
-  document.getElementById("preview").textContent = JSON.stringify(p, null, 2);
+  $("#preview").textContent = JSON.stringify(payloadDatos(), null, 2);
 }
 
-// --- Guardar datos del complejo ---
+/* ====== GUARDAR DATOS ====== */
 async function idDisponible(id) {
-  const actuales = await fetch(`${backend}/datos_complejos`).then(r => r.json());
+  const actuales = await fetch(`${backend}/datos_complejos?t=${Date.now()}`).then(r => r.json());
   return !actuales[id];
 }
 
 async function guardarDatos() {
-  const id = document.getElementById("id").value.trim();
-  const msg = document.getElementById("msgDatos"); 
+  const id = $("#id").value.trim();
+  const msg = $("#msgDatos"); 
   msg.textContent = ""; msg.className = "";
 
   if (!id) { msg.textContent = "Falta el ID"; msg.className = "err"; return; }
   if (!validarSlug(id)) { msg.textContent = "ID inválido. Usá solo letras, números, - y _"; msg.className = "err"; return; }
 
-  // Verificar que no exista
-  if (!(await idDisponible(id))) { msg.textContent = "Ese ID ya existe"; msg.className = "err"; return; }
-
-  // Traigo actuales
-  const actuales = await fetch(`${backend}/datos_complejos`).then(r => r.json());
-  // Nuevo payload
+  // Si ya existe, avisamos que se actualizará
+  const existe = !(await idDisponible(id));
+  const actuales = await fetch(`${backend}/datos_complejos?t=${Date.now()}`).then(r => r.json());
   const nuevo = payloadDatos();
-  // Merge y guardo
   const merged = { ...actuales, ...nuevo };
 
   await fetch(`${backend}/guardarDatos`, {
@@ -280,7 +263,7 @@ async function guardarDatos() {
     body: JSON.stringify(merged)
   });
 
-  msg.textContent = "Datos del complejo guardados ✅";
+  msg.textContent = existe ? "Datos actualizados ✅" : "Datos del complejo guardados ✅";
   msg.className = "ok";
 
   // Guardar localmente el ID para la sección OAuth
@@ -288,63 +271,37 @@ async function guardarDatos() {
   pintarEstadoMP();
 }
 
-// --- Guardar token de MP (manual, lo mantenemos) ---
-async function guardarToken() {
-  const id = document.getElementById("id").value.trim();
-  const token = document.getElementById("token").value.trim();
-  const msg = document.getElementById("msgToken"); 
-  msg.textContent = ""; msg.className = "";
-
-  if (!id || !token) {
-    msg.textContent = "Completá ID y Access Token";
-    msg.className = "err";
-    return;
-  }
-
-  const r = await fetch(`${backend}/alta-credencial`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ id, mp_access_token: token })
-  });
-
-  const dj = await r.json();
-  if (dj.ok) {
-    msg.textContent = "Access Token guardado ✅";
-    msg.className = "ok";
-  } else {
-    msg.textContent = dj.error || "No se pudo guardar";
-    msg.className = "err";
-  }
-}
-
-/* ======= Pagos (Mercado Pago) - OAuth ======= */
-
-// Detectar ID del complejo desde #id o localStorage
+/* ====== OAUTH MERCADO PAGO ====== */
 function getComplejoId() {
-  const v = document.querySelector("#id")?.value?.trim() || localStorage.getItem("complejoId") || "";
-  return v;
+  // intenta por query ?complejo=, luego por input, luego por localStorage
+  const byQuery = new URLSearchParams(location.search).get("complejo") || "";
+  if (byQuery) return byQuery.trim();
+  const byInput = $("#id")?.value?.trim();
+  if (byInput) return byInput;
+  return localStorage.getItem("complejoId") || "";
 }
 
 async function pintarEstadoMP() {
   const complejoId = getComplejoId();
-  const estadoEl = document.getElementById("mpEstado");
-  const btnCon = document.getElementById("btnConectar");
-  const btnTest = document.getElementById("btnProbarMP");
+  const estadoEl = $("#mpEstado");
+  const btnCon = $("#btnConectar");
+  const btnTest = $("#btnProbarMP");
   if (!estadoEl || !btnCon || !btnTest) return;
 
   if (!complejoId) {
-    estadoEl.textContent = "Primero completá el ID/slug del complejo.";
+    estadoEl.textContent = "Primero completá el ID/slug del complejo (Sección 1).";
     btnCon.style.display = "none";
     btnTest.style.display = "none";
     return;
   }
+
   try {
     const r = await fetch(`${backend}/mp/estado?complejoId=${encodeURIComponent(complejoId)}`);
     const dj = await r.json();
     if (dj.ok && dj.conectado) {
       estadoEl.textContent = "🟢 Mercado Pago conectado";
       btnCon.style.display = "none";
-      btnTest.style.display = "inline-block";     // <-- mostrar test
+      btnTest.style.display = "inline-block";
     } else {
       estadoEl.textContent = "🔴 Mercado Pago NO conectado";
       btnCon.style.display = "inline-block";
@@ -356,60 +313,49 @@ async function pintarEstadoMP() {
     btnTest.style.display = "none";
   }
 }
+
 function conectarMP() {
   const complejoId = getComplejoId();
   if (!complejoId) return alert("Completá el ID/slug del complejo primero.");
   localStorage.setItem("complejoId", complejoId);
-  window.location.href = `${backend}/mp/conectar?complejoId=${encodeURIComponent(complejoId)}`;
-}
-<button id="btnConectarMP">Conectar Mercado Pago</button>
-<span id="estadoMP"></span>
-<script>
-const backend = "https://recomplejos-backend.onrender.com";
-const complejoId = new URLSearchParams(location.search).get("complejo") || "prueba3";
-
-async function pintarEstado() {
-  const r = await fetch(`${backend}/mp/estado?complejoId=${encodeURIComponent(complejoId)}`);
-  const j = await r.json();
-  document.getElementById('estadoMP').textContent = j.conectado ? "Conectado ✅" : "No conectado ❌";
-}
-document.getElementById('btnConectarMP').onclick = () => {
   location.href = `${backend}/mp/conectar?complejoId=${encodeURIComponent(complejoId)}`;
-};
-pintarEstado();
-</script>
+}
 
 async function probarCobro() {
   const complejoId = getComplejoId();
   if (!complejoId) return alert("Completá el ID/slug del complejo primero.");
-
   try {
     const r = await fetch(`${backend}/crear-preferencia`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         complejoId,
-        clave: `test-${Date.now()}`,   // clave ficticia para la prueba
+        clave: `test-${Date.now()}`,
         titulo: "Prueba de seña",
-        precio: 10,                    // $10 de prueba
+        precio: 10,
         nombre: "Prueba",
         telefono: "000"
       })
     });
     const dj = await r.json();
     if (dj?.init_point) {
-      // Te llevo al checkout de MP
-      window.location.href = dj.init_point;
+      location.href = dj.init_point;
     } else {
       console.log(dj);
-      alert("No se pudo generar la preferencia de prueba.");
+      alert(dj?.error || "No se pudo generar la preferencia de prueba.");
     }
   } catch (e) {
     console.error(e);
     alert("Error creando preferencia de prueba.");
   }
 }
-// --- Listeners para refrescar preview en vivo ---
+
+/* ====== EVENTOS ====== */
+document.getElementById("btnAgregarCancha").onclick = () => { agregarCancha(); };
+document.getElementById("btnGuardar").onclick = guardarDatos;
+document.getElementById("btnConectar").onclick = conectarMP;
+document.getElementById("btnProbarMP").onclick = probarCobro;
+
 document.addEventListener("input", e=>{
   if (["id","clave","nombre","ciudad","maps","emailDueño","whatsappDueño"].includes(e.target.id)) {
     refrescarPreview();
@@ -424,12 +370,17 @@ document.addEventListener("change", e=>{
 });
 document.getElementById("canchas").addEventListener("input", refrescarPreview);
 
-// Init
+/* ====== INIT ====== */
 armarHorarios();
 armarServicios();
-agregarCancha(); // una de ejemplo
+agregarCancha();        // una cancha de ejemplo
 refrescarPreview();
-window.addEventListener("load", pintarEstadoMP);
+window.addEventListener("load", () => {
+  // si viene ?complejo= en la URL, lo llena en el input
+  const q = new URLSearchParams(location.search).get("complejo");
+  if (q) { const idEl = $("#id"); if (idEl && !idEl.value) idEl.value = q; }
+  pintarEstadoMP();
+});
 </script>
 </body>
 </html>
