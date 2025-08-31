@@ -138,10 +138,12 @@ setInterval(limpiarHoldsVencidos, 60 * 1000); // cada minuto
 // RUTAS EXISTENTES (no tocamos nombres)
 // =======================
 
-// Datos del complejo
+// Datos del complejo (sin caché)
 app.get("/datos_complejos", (_req, res) => {
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
   res.json(leerJSON(pathDatos));
 });
+
 
 app.post("/guardarDatos", (req, res) => {
   // Guarda el JSON completo (usa onboarding y panel)
@@ -754,6 +756,7 @@ app.get("/debug/token", (req, res) => {
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en http://localhost:${PORT}`);
 });
+
 
 
 
