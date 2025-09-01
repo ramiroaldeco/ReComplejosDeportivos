@@ -134,17 +134,70 @@ function limpiarHoldsVencidos() {
 }
 setInterval(limpiarHoldsVencidos, 60 * 1000); // cada minuto
 
+// === REFRESH OAuth Mercado Pago ===
+// (Corregido para usar el JSON completo de credenciales)
+async function refreshTokenMP(complejoId) {
+  const allCreds = leerCredsMP_OAUTH(); // <- JSON completo { [complejoId]: { oauth: {...} } }
+  const creds = allCreds?.[complejoId]?.oauth || null; // <- credenciales del complejo
+
+  if (!creds?.refresh_token) {
+    throw new Error(`No hay refresh_token guardado para ${complejoId}`);
+  }
+
+  const body = {
+    grant_type: "refresh_token",
+    client_id: process.env.MP_CLIENT_ID,
+    client_secret: process.env.MP_CLIENT_SECRET,
+    refresh_token: creds.refresh_token
+  };
+
+  const r = await fetch("https://api.mercadopago.com/oauth/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const data = await r.json();
+
+  if (!r.ok || !data?.access_token) {
+    console.error("Fallo refresh_token MP:", { status: r.status, data });
+    throw new Error("No se pudo refrescar el token de MP");
+  }
+
+  const newCreds = {
+    access_token: data.access_token,
+    refresh_token: data.refresh_token || creds.refresh_token,
+    scope: data.scope,
+    token_type: data.token_type,
+    live_mode: data.live_mode,
+    expires_in: data.expires_in,
+    obtained_at: Date.now()
+  };
+
+  // Persistimos sobre el objeto completo
+  allCreds[complejoId] = allCreds[complejoId] || {};
+  allCreds[complejoId].oauth = {
+    ...(allCreds[complejoId].oauth || {}),
+    ...newCreds
+  };
+  escribirCredsMP_OAUTH(allCreds);
+
+  return newCreds.access_token;
+}
+
+// SDK con token que le pasemos
+function mpClientCon(token) {
+  const { MercadoPagoConfig, Preference } = require("mercadopago");
+  const mp = new MercadoPagoConfig({ accessToken: token });
+  return { Preference: new Preference(mp) };
+}
 // =======================
 // RUTAS EXISTENTES (no tocamos nombres)
 // =======================
-
 // Datos del complejo (sin caché)
 app.get("/datos_complejos", (_req, res) => {
   res.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
   res.json(leerJSON(pathDatos));
 });
-
-
 app.post("/guardarDatos", (req, res) => {
   // Guarda el JSON completo (usa onboarding y panel)
   escribirJSON(pathDatos, req.body);
@@ -324,36 +377,18 @@ app.post("/crear-preferencia", async (req, res) => {
   };
   escribirJSON(pathReservas, reservas);
 
-  // 1) Chequear que el complejo tenga OAuth (tokenPara ahora tira error si falta)
-  let mpConfig;
-  try {
-    // Si tenés helper mpClient(complejoId) que usa tokenPara, podés usarlo:
-    // mpConfig = mpClient(complejoId);
-    // O crear el config directo con el token OAuth del dueño:
-    const tokenDeDueno = tokenPara(complejoId);
-    mpConfig = new MercadoPagoConfig({ access_token: tokenDeDueno });
-  } catch (e) {
-    // Liberar HOLD si el complejo no tiene OAuth
-    delete reservas[clave];
-    escribirJSON(pathReservas, reservas);
-
-    if (e.code === "NO_OAUTH") {
-      return res.status(409).json({
-        error: "Este complejo aún no conectó su Mercado Pago. Pedile al dueño que toque 'Conectar Mercado Pago'."
-      });
-    }
-    return res.status(500).json({ error: "Error obteniendo credenciales del dueño" });
-  }
-
-  // 2) Crear preferencia SIEMPRE con el token OAuth del dueño
-  try {
-    const preference = new Preference(mpConfig);
-    const result = await preference.create({
+  // Helper local: crea la preferencia usando el token indicado
+  const crearCon = async (accessToken) => {
+    // ¡Ojo! La key correcta es accessToken (camelCase)
+    const mp = new MercadoPagoConfig({ accessToken });
+    const preference = new Preference(mp);
+    return await preference.create({
       body: {
         items: [{
           title: titulo || "Seña de reserva",
           unit_price: monto,
-          quantity: 1
+          quantity: 1,
+          currency_id: "ARS"
         }],
         back_urls: {
           success: `${process.env.PUBLIC_URL}/reservar-exito.html`,
@@ -365,8 +400,76 @@ app.post("/crear-preferencia", async (req, res) => {
         metadata: { clave, complejoId, nombre: nombre || "", telefono: telefono || "" }
       }
     });
+  };
 
-    // Guardar datos de la preferencia en la reserva
+  try {
+    // 1) Token actual del dueño para este complejo
+    let tokenActual;
+    try {
+      tokenActual = await tokenPara(complejoId);
+    } catch (e) {
+      // Liberar HOLD si el complejo no tiene OAuth
+      delete reservas[clave];
+      escribirJSON(pathReservas, reservas);
+
+      if (e.code === "NO_OAUTH") {
+        return res.status(409).json({
+          error: "Este complejo aún no conectó su Mercado Pago. Pedile al dueño que toque 'Conectar Mercado Pago'."
+        });
+      }
+      return res.status(500).json({ error: "Error obteniendo credenciales del dueño" });
+    }
+
+    // 2) Primer intento de creación
+    let result;
+    try {
+      result = await crearCon(tokenActual);
+    } catch (err) {
+      // Si el token está inválido/expirado (401 o message=invalid_token) -> refrescamos y reintentamos UNA VEZ
+      const status = err?.status || err?.body?.status;
+      const msg = (err?.body && (err.body.message || err.body.error)) || err?.message || "";
+      if (status === 401 || /invalid_token/i.test(msg)) {
+        console.warn("Token MP inválido/expirado -> refrescando y reintentando…");
+        try {
+          const tokenNuevo = await refreshTokenMP(complejoId);
+          result = await crearCon(tokenNuevo);
+        } catch (err2) {
+          // Falló también tras refrescar: soltamos el HOLD y devolvemos error
+          const rr = leerJSON(pathReservas);
+          delete rr[clave];
+          escribirJSON(pathReservas, rr);
+
+          console.error("MP error crear-preferencia (post-refresh):", {
+            message: err2?.message,
+            body: err2?.body || err2?.response || err2
+          });
+
+          const detalle2 =
+            (err2?.body && (err2.body.message || err2.body.error || (Array.isArray(err2.body.cause) && err2.body.cause[0]?.description))) ||
+            err2?.message ||
+            "Error creando preferencia";
+          return res.status(400).json({ error: detalle2 });
+        }
+      } else {
+        // Otro error: soltamos HOLD y devolvemos
+        const rr = leerJSON(pathReservas);
+        delete rr[clave];
+        escribirJSON(pathReservas, rr);
+
+        console.error("MP error crear-preferencia:", {
+          message: err?.message,
+          body: err?.body || err?.response || err
+        });
+
+        const detalle =
+          (err?.body && (err.body.message || err.body.error || (Array.isArray(err.body.cause) && err.body.cause[0]?.description))) ||
+          err?.message ||
+          "Error creando preferencia";
+        return res.status(400).json({ error: detalle });
+      }
+    }
+
+    // 3) Si llegamos acá, tenemos 'result' OK (sea del 1er intento o del reintento)
     reservas[clave] = {
       ...reservas[clave],
       status: "hold",                  // se mantiene en HOLD hasta el webhook
@@ -383,27 +486,25 @@ app.post("/crear-preferencia", async (req, res) => {
       init_point: result.init_point
     });
 
-  } catch (err) {
-    // Si falla la creación, liberar el HOLD para que otro pueda intentar
+  } catch (e) {
+    // Cualquier otra excepción: liberar HOLD
     const rr = leerJSON(pathReservas);
     delete rr[clave];
     escribirJSON(pathReservas, rr);
 
-    // Log más claro (Render logs)
-    console.error("MP error crear-preferencia:", {
-      message: err?.message,
-      body: err?.body || err?.response || err
+    console.error("MP error crear-preferencia (catch outer):", {
+      message: e?.message,
+      body: e?.body || e?.response || e
     });
 
-    // Intentar extraer detalle útil de la respuesta de MP
     const detalle =
-      (err?.body && (err.body.message || err.body.error || (Array.isArray(err.body.cause) && err.body.cause[0]?.description))) ||
-      err?.message ||
+      (e?.body && (e.body.message || e.body.error || (Array.isArray(e.body.cause) && e.body.cause[0]?.description))) ||
+      e?.message ||
       "Error creando preferencia";
-
     return res.status(400).json({ error: detalle });
   }
 });
+
 
 /* ============================================================
    LEGADO (backup): tu flujo anterior con retry/refresh
@@ -639,6 +740,7 @@ app.get("/mp/callback", async (req, res) => {
   }
 
   try {
+    // Intercambio del authorization_code por tokens OAuth
     const r = await fetch("https://api.mercadopago.com/oauth/token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -657,25 +759,30 @@ app.get("/mp/callback", async (req, res) => {
       return res.status(400).send("❌ No se pudo conectar Mercado Pago.");
     }
 
-    const creds = leerCredsMP_OAUTH();
+    // Guardamos credenciales OAuth por complejo (incluye refresh_token)
+    const creds = leerCredsMP_OAUTH(); // tu helper que lee el JSON de credenciales
     creds[complejoId] = creds[complejoId] || {};
     creds[complejoId].oauth = {
       access_token: data.access_token,
-      refresh_token: data.refresh_token,
-      user_id: data.user_id,
-      updated_at: Date.now()
+      refresh_token: data.refresh_token,           // IMPORTANTE para poder renovar
+      user_id: data.user_id || data.user_id_in_site || null,
+      token_type: data.token_type || "Bearer",
+      scope: data.scope || "",
+      live_mode: !!data.live_mode,
+      expires_in: data.expires_in || null,
+      updated_at: Date.now()                        // marca temporal local
     };
-    escribirCredsMP_OAUTH(creds);
+    escribirCredsMP_OAUTH(creds); // tu helper que persiste
 
-  // ... dentro de /mp/callback
-  // después de escribirCredsMP_OAUTH(creds);
+    // Mini página con botones para volver al onboarding o ir a reservar
+    const slug = encodeURIComponent(complejoId);
+    const base = process.env.PUBLIC_URL; // ej: https://ramiroaldeco.github.io/recomplejos-frontend
+    const urlOnboarding = `${base}/onboarding.html?complejo=${slug}&mp=ok`;
+    const urlFrontend   = `${base}/frontend.html?complejo=${slug}`;
 
-  const slug = encodeURIComponent(complejoId);
-  const base = process.env.PUBLIC_URL; // ej: https://ramiroaldeco.github.io/recomplejos-frontend
-  const urlOnboarding = `${base}/onboarding.html?complejo=${slug}&mp=ok`;
-  const urlFrontend   = `${base}/frontend.html?complejo=${slug}`;
-
-  res.status(200).send(`<!doctype html>
+    return res
+      .status(200)
+      .send(`<!doctype html>
 <html lang="es"><head>
 <meta charset="utf-8">
 <title>Mercado Pago conectado</title>
@@ -705,9 +812,10 @@ app.get("/mp/callback", async (req, res) => {
 </body></html>`);
   } catch (e) {
     console.error(e);
-    res.status(500).send("❌ Error interno al conectar Mercado Pago.");
+    return res.status(500).send("❌ Error interno al conectar Mercado Pago.");
   }
 });
+
 // ---- DEBUG: credenciales guardadas por complejo (NO expone tokens completos)
 app.get("/debug/credenciales", (_req, res) => {
   try {
@@ -756,6 +864,7 @@ app.get("/debug/token", (req, res) => {
 app.listen(PORT, () => {
   console.log(`Servidor corriendo en http://localhost:${PORT}`);
 });
+
 
 
 
