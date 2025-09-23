@@ -35,8 +35,9 @@ if (!fs.existsSync(pathReservas)) escribirJSON(pathReservas, {});
 if (!fs.existsSync(pathCreds))    escribirJSON(pathCreds, {});
 if (!fs.existsSync(pathIdx))      escribirJSON(pathIdx, {});
 
-// ---- Config MP por complejo
-// ---- Config MP por complejo (SOLO OAuth)
+// =======================
+// CONFIG MP por complejo (SOLO OAuth)
+// =======================
 function tokenPara(complejoId) {
   const cred = leerJSON(pathCreds);
   const c = cred[complejoId] || {};
@@ -52,11 +53,8 @@ function tokenPara(complejoId) {
 function mpClient(complejoId) {
   return new MercadoPagoConfig({ access_token: tokenPara(complejoId) });
 }
-// =======================
-// PARCHE AGREGADO (refresh + retry si invalid_token)
-// =======================
 
-// Helpers con nombres únicos para evitar colisiones
+// Helpers de credenciales OAuth (persistencia en JSON)
 const CREDS_MP_PATH_OAUTH = path.join(__dirname, "credenciales_mp.json");
 function leerCredsMP_OAUTH() {
   try { return JSON.parse(fs.readFileSync(CREDS_MP_PATH_OAUTH, "utf8")); }
@@ -113,32 +111,10 @@ async function refreshOAuthToken(complejoId) {
   return j.access_token;
 }
 
-// ---- Anti doble-reserva: HOLD
-const HOLD_MIN = parseInt(process.env.HOLD_MIN || "10", 10); // 10 min default
-
-function estaHoldActiva(r) {
-  return r && r.status === "hold" && r.holdUntil && Date.now() < r.holdUntil;
-}
-function limpiarHoldsVencidos() {
-  const reservas = leerJSON(pathReservas);
-  let cambio = false;
-  for (const k of Object.keys(reservas)) {
-    const r = reservas[k];
-    if (r?.status === "hold" && r.holdUntil && Date.now() >= r.holdUntil) {
-      // liberar
-      delete reservas[k];
-      cambio = true;
-    }
-  }
-  if (cambio) escribirJSON(pathReservas, reservas);
-}
-setInterval(limpiarHoldsVencidos, 60 * 1000); // cada minuto
-
-// === REFRESH OAuth Mercado Pago ===
-// (Corregido para usar el JSON completo de credenciales)
+// === REFRESH OAuth Mercado Pago (variación usada en crear-preferencia) ===
 async function refreshTokenMP(complejoId) {
-  const allCreds = leerCredsMP_OAUTH(); // <- JSON completo { [complejoId]: { oauth: {...} } }
-  const creds = allCreds?.[complejoId]?.oauth || null; // <- credenciales del complejo
+  const allCreds = leerCredsMP_OAUTH(); // JSON completo { [complejoId]: { oauth: {...} } }
+  const creds = allCreds?.[complejoId]?.oauth || null;
 
   if (!creds?.refresh_token) {
     throw new Error(`No hay refresh_token guardado para ${complejoId}`);
@@ -173,7 +149,6 @@ async function refreshTokenMP(complejoId) {
     obtained_at: Date.now()
   };
 
-  // Persistimos sobre el objeto completo
   allCreds[complejoId] = allCreds[complejoId] || {};
   allCreds[complejoId].oauth = {
     ...(allCreds[complejoId].oauth || {}),
@@ -190,17 +165,107 @@ function mpClientCon(token) {
   const mp = new MercadoPagoConfig({ accessToken: token });
   return { Preference: new Preference(mp) };
 }
+
 // =======================
-// RUTAS EXISTENTES (no tocamos nombres)
+// HOLD anti doble-reserva
 // =======================
+const HOLD_MIN = parseInt(process.env.HOLD_MIN || "10", 10); // 10 min default
+
+function estaHoldActiva(r) {
+  return r && r.status === "hold" && r.holdUntil && Date.now() < r.holdUntil;
+}
+function limpiarHoldsVencidos() {
+  const reservas = leerJSON(pathReservas);
+  let cambio = false;
+  for (const k of Object.keys(reservas)) {
+    const r = reservas[k];
+    if (r?.status === "hold" && r.holdUntil && Date.now() >= r.holdUntil) {
+      // liberar
+      delete reservas[k];
+      cambio = true;
+    }
+  }
+  if (cambio) escribirJSON(pathReservas, reservas);
+}
+setInterval(limpiarHoldsVencidos, 60 * 1000); // cada minuto
+
+// =======================
+// Helpers fecha/hora/clave (NUEVO)
+// =======================
+const TZ = "America/Argentina/Cordoba";
+
+// normaliza nombre de cancha para la clave
+function slugCancha(nombre=""){ 
+  return String(nombre).toLowerCase().replace(/\s+/g,"").replace(/[^a-z0-9]/g,""); 
+}
+
+// YYYY-MM-DD válido y HH:mm válido
+function esFechaISO(d){ return /^\d{4}-\d{2}-\d{2}$/.test(d); }
+function esHora(h){ return /^\d{2}:\d{2}$/.test(h); }
+
+// obtiene nombre de día (Lunes..Domingo) respetando TZ local
+function nombreDia(fechaISO){
+  const d = new Date(`${fechaISO}T00:00:00-03:00`); // TZ fija local
+  const dias = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
+  return dias[d.getDay()];
+}
+
+// dentro de franja (maneja cruces tipo 22:00->02:00)
+function entre(hora, desde, hasta){
+  if(!desde || !hasta) return false;
+  return (desde <= hasta) ? (hora >= desde && hora <= hasta)
+                          : (hora >= desde || hora <= hasta);
+}
+
+// valida: no pasado, dentro de horario configurado y cancha existente
+function validarTurno({complejoId, canchaNombre, fecha, hora}){
+  const datos = leerJSON(pathDatos);
+  const info = datos[complejoId];
+  if(!info) return {ok:false, error:"Complejo inexistente"};
+
+  // cancha existe
+  const cancha = (info.canchas || []).find(c => slugCancha(c.nombre) === slugCancha(canchaNombre));
+  if(!cancha) return {ok:false, error:"Cancha inexistente"};
+
+  // fecha/hora formato
+  if(!esFechaISO(fecha) || !esHora(hora)) return {ok:false, error:"Fecha u hora inválida"};
+
+  // no pasado (comparando con ahora local)
+  const ahora = new Date();
+  const turno = new Date(`${fecha}T${hora}:00-03:00`);
+  if (turno.getTime() < ahora.getTime()) return {ok:false, error:"Turno en el pasado"};
+
+  // dentro de horarios del día
+  const nomDia = nombreDia(fecha);
+  const hDia = (info.horarios || {})[nomDia] || {};
+  const desde = hDia.desde || "18:00";
+  const hasta = hDia.hasta || "23:00";
+  if(!entre(hora, desde, hasta)) return {ok:false, error:`Fuera de horario (${nomDia} ${desde}-${hasta})`};
+
+  return {ok:true, cancha};
+}
+
+// arma clave canonical
+function claveDe({complejoId, canchaNombre, fecha, hora}){
+  return `${complejoId}-${slugCancha(canchaNombre)}-${fecha}-${hora}`;
+}
+
+// =======================
+// RUTAS EXISTENTES (no tocamos nombres) + nuevas
+// =======================
+
 // Datos del complejo (sin caché)
 app.get("/datos_complejos", (_req, res) => {
   res.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
   res.json(leerJSON(pathDatos));
 });
+
+// Guardar datos (MERGE, para que onboarding no pise otros complejos)
 app.post("/guardarDatos", (req, res) => {
-  // Guarda el JSON completo (usa onboarding y panel)
-  escribirJSON(pathDatos, req.body);
+  const actuales = leerJSON(pathDatos);
+  const nuevos = req.body || {};
+  const merged = { ...actuales, ...nuevos };
+  escribirJSON(pathDatos, merged);
   res.json({ ok: true });
 });
 
@@ -223,7 +288,7 @@ app.get("/reservas", (_req, res) => {
   res.json(leerJSON(pathReservas));
 });
 
-// Guardar UNA reserva directa (lo usa reservar-exito.html si querés mantenerlo)
+// Guardar UNA reserva directa (legado)
 app.post("/guardarReserva", (req, res) => {
   const { clave, nombre, telefono } = req.body;
   const reservas = leerJSON(pathReservas);
@@ -250,9 +315,8 @@ app.post("/login", (req, res) => {
 });
 
 // =======================
-// Notificaciones opcionales (WhatsApp Cloud / Resend)
+// NOTIFICACIONES opcionales (WhatsApp Cloud / Resend)
 // =======================
-
 async function enviarWhatsApp(complejoId, texto) {
   const token = process.env.WHATSAPP_TOKEN;
   const phoneId = process.env.WHATSAPP_PHONE_ID;
@@ -333,17 +397,49 @@ Seña: $${monto}`;
 }
 
 // =======================
-// PAGOS: crear preferencia + Webhook
+// NUEVOS ENDPOINTS: disponibilidad + estado-reserva
 // =======================
+
+// ¿Está libre este turno exacto?
+app.get("/disponible", (req,res)=>{
+  const { complejoId, cancha, fecha, hora } = req.query || {};
+  const v = validarTurno({complejoId, canchaNombre: cancha, fecha, hora});
+  if(!v.ok) return res.json({ ok:false, motivo:v.error });
+
+  const reservas = leerJSON(pathReservas);
+  const clave = claveDe({complejoId, canchaNombre: cancha, fecha, hora});
+  const r = reservas[clave];
+
+  // ocupa si está approved o hold vigente
+  const ocupado = Boolean(r && (r.status === "approved" || estaHoldActiva(r)));
+  return res.json({ ok:true, libre: !ocupado });
+});
+
+// Estado de una reserva por clave
+app.get("/estado-reserva", (req,res)=>{
+  const { clave } = req.query || {};
+  if(!clave) return res.status(400).json({ error:"Falta clave" });
+  const reservas = leerJSON(pathReservas);
+  const r = reservas[clave];
+  if(!r) return res.json({ ok:true, existe:false, status:"none" });
+  return res.json({ ok:true, existe:true, status:r.status, data:r });
+});
 
 // =======================
 // PAGOS: crear preferencia + Webhook (SOLO OAuth)
 // =======================
-
 app.post("/crear-preferencia", async (req, res) => {
   const {
     complejoId,
-    clave,
+
+    // NUEVOS CAMPOS
+    cancha,     // nombre visible de la cancha
+    fecha,      // YYYY-MM-DD
+    hora,       // HH:mm
+
+    // LEGADO (por compat): si viene clave la aceptamos, pero recomendamos NO usarla desde el front
+    clave: claveLegacy,
+
     titulo,
     precio,     // puede venir o no
     senia,      // puede venir o no
@@ -353,8 +449,19 @@ app.post("/crear-preferencia", async (req, res) => {
 
   // Aceptar senia o precio indistintamente
   const monto = Number((precio ?? senia));
-  if (!complejoId || !clave || !monto) {
-    return res.status(400).json({ error: "Faltan datos" });
+  if (!complejoId || !monto) {
+    return res.status(400).json({ error: "Faltan datos (complejoId/monto)" });
+  }
+
+  // Si llegaron los campos nuevos, VALIDAMOS y construimos clave canonical
+  let clave = claveLegacy;
+  if (cancha && fecha && hora) {
+    const v = validarTurno({complejoId, canchaNombre: cancha, fecha, hora});
+    if(!v.ok) return res.status(400).json({ error: v.error });
+    clave = claveDe({complejoId, canchaNombre: cancha, fecha, hora});
+  }
+  if (!clave) {
+    return res.status(400).json({ error: "Faltan cancha/fecha/hora (o clave)" });
   }
 
   const reservas = leerJSON(pathReservas);
@@ -373,13 +480,15 @@ app.post("/crear-preferencia", async (req, res) => {
     nombre: nombre || "",
     telefono: telefono || "",
     complejoId,
-    monto
+    monto,
+    cancha: cancha || "",
+    fecha: fecha || "",
+    hora: hora || ""
   };
   escribirJSON(pathReservas, reservas);
 
   // Helper local: crea la preferencia usando el token indicado
   const crearCon = async (accessToken) => {
-    // ¡Ojo! La key correcta es accessToken (camelCase)
     const mp = new MercadoPagoConfig({ accessToken });
     const preference = new Preference(mp);
     return await preference.create({
@@ -505,21 +614,17 @@ app.post("/crear-preferencia", async (req, res) => {
   }
 });
 
-
 /* ============================================================
    LEGADO (backup): tu flujo anterior con retry/refresh
-   Lo dejo envuelto en una función async para evitar await top-level.
-   NO se llama desde ningún lado; solo queda por si querés volver.
+   Queda por si querés volver. No se invoca.
    ============================================================ */
 async function _legacyCrearPreferencia({ complejoId, clave, titulo, monto, holdUntil }) {
-  // URLs de retorno y webhook
   const FRONT_URL  = process.env.PUBLIC_URL  || `https://ramiroaldeco.github.io/recomplejos-frontend`;
   const BACK_URL   = process.env.BACKEND_URL || `https://recomplejos-backend.onrender.com`;
   const success = `${FRONT_URL}/reservar-exito.html`;
   const pending = `${FRONT_URL}/reservar-pendiente.html`;
   const failure = `${FRONT_URL}/reservar-error.html`;
 
-  // Armado de preferencia (reutilizable en retry)
   const prefBody = {
     items: [
       { title: titulo || "Seña de reserva", unit_price: monto, quantity: 1 }
@@ -534,7 +639,6 @@ async function _legacyCrearPreferencia({ complejoId, clave, titulo, monto, holdU
   let pref;
   let initPoint = "";
 
-  // Intento 1 con el token actual del complejo
   try {
     const tokenActual = tokenPara(complejoId);
     const mp = new MercadoPagoConfig({ access_token: tokenActual });
@@ -548,7 +652,6 @@ async function _legacyCrearPreferencia({ complejoId, clave, titulo, monto, holdU
       result?.response?.init_point || "";
 
   } catch (err1) {
-    // Si el error es por invalid_token y tenemos refresh_token, refrescamos y reintentamos UNA vez
     if (isInvalidTokenError(err1)) {
       try {
         const nuevoToken = await refreshOAuthToken(complejoId);
@@ -564,7 +667,6 @@ async function _legacyCrearPreferencia({ complejoId, clave, titulo, monto, holdU
           r2?.response?.init_point || "";
 
       } catch (err2) {
-        // si falló MP aún después del refresh, liberamos el HOLD y devolvemos error
         const rr = leerJSON(pathReservas);
         delete rr[clave];
         escribirJSON(pathReservas, rr);
@@ -574,7 +676,6 @@ async function _legacyCrearPreferencia({ complejoId, clave, titulo, monto, holdU
         return { ok:false, error: info };
       }
     } else {
-      // Error que no es invalid_token: liberar HOLD y salir
       const rr = leerJSON(pathReservas);
       delete rr[clave];
       escribirJSON(pathReservas, rr);
@@ -585,14 +686,11 @@ async function _legacyCrearPreferencia({ complejoId, clave, titulo, monto, holdU
     }
   }
 
-  // Si llegamos acá, hay pref creada
   try {
-    // indexamos preference -> clave (para el webhook)
     const idx = leerJSON(pathIdx);
     idx[pref] = { clave, complejoId };
     escribirJSON(pathIdx, idx);
 
-    // Guardamos datos en la reserva
     const r2 = leerJSON(pathReservas);
     if (r2[clave]) {
       r2[clave].status = "pending";
@@ -604,13 +702,14 @@ async function _legacyCrearPreferencia({ complejoId, clave, titulo, monto, holdU
 
     return { ok:true, preference_id: pref, init_point: initPoint || null };
   } catch (err) {
-    // si algo rompe acá, igualmente la preferencia existe; solo logueamos
     console.error("Post-crear-preferencia error:", err?.message || err);
     return { ok:true, preference_id: pref, init_point: initPoint || null };
   }
 }
 
+// =======================
 // Webhook de Mercado Pago
+// =======================
 app.post("/webhook-mp", async (req, res) => {
   try {
     // Aceptamos rápido para que MP no reintente de más
@@ -622,12 +721,11 @@ app.post("/webhook-mp", async (req, res) => {
     if (!paymentId) return;
 
     // Consultamos el pago para conocer status y preference_id
-    // Probaremos con el token global y, si falla, con cada token de credenciales
     const tokensATestar = [];
     const cred = leerJSON(pathCreds);
     if (process.env.MP_ACCESS_TOKEN) tokensATestar.push(process.env.MP_ACCESS_TOKEN);
     for (const k of Object.keys(cred)) {
-      if (cred[k]?.oauth?.access_token) tokensATestar.push(cred[k].oauth.access_token); // <-- OAuth primero
+      if (cred[k]?.oauth?.access_token) tokensATestar.push(cred[k].oauth.access_token); // OAuth primero
       if (cred[k]?.access_token)        tokensATestar.push(cred[k].access_token);
       if (cred[k]?.mp_access_token)     tokensATestar.push(cred[k].mp_access_token);
     }
@@ -667,11 +765,10 @@ app.post("/webhook-mp", async (req, res) => {
     if (status === "approved") {
       r.status = "approved";
       r.paidAt = Date.now();
-      // Aseguramos datos útiles para notificación
       r.nombre = r.nombre || "";
       r.telefono = r.telefono || "";
       r.complejoId = r.complejoId || complejoId || "";
-      // Notificar (no bloqueante)
+
       const infoNoti = {
         clave,
         complejoId: r.complejoId,
@@ -683,11 +780,13 @@ app.post("/webhook-mp", async (req, res) => {
       notificarAprobado(infoNoti).catch(()=>{});
       // limpiar hold
       delete r.holdUntil;
+
     } else if (status === "rejected" || status === "cancelled") {
       // liberar el turno
       delete reservas[clave];
       escribirJSON(pathReservas, reservas);
       return;
+
     } else {
       r.status = "pending"; // in_process / pending
       escribirJSON(pathReservas, { ...reservas, [clave]: r });
@@ -701,13 +800,7 @@ app.post("/webhook-mp", async (req, res) => {
   }
 });
 
-// ===== OAuth Mercado Pago: callback / conectar / estado =====
-// ⚠️ IMPORTANTE: dejá estas rutas ANTES de app.listen(...) y de cualquier middleware 404
-
-// Helpers con nombres únicos para evitar colisiones
-// (ya definidos arriba como CREDS_MP_PATH_OAUTH / leerCredsMP_OAUTH / escribirCredsMP_OAUTH)
-
-// Redirige al dueño a autorizar tu app (state = complejoId)
+// ===== OAuth Mercado Pago: conectar / estado / callback =====
 app.get("/mp/conectar", (req, res) => {
   const { complejoId } = req.query;
   if (!complejoId) return res.status(400).send("Falta complejoId");
@@ -722,7 +815,6 @@ app.get("/mp/conectar", (req, res) => {
   res.redirect(u.toString());
 });
 
-// Estado de conexión para pintar UI (conectado / no)
 app.get("/mp/estado", (req, res) => {
   const { complejoId } = req.query;
   if (!complejoId) return res.status(400).json({ ok:false, error:"Falta complejoId" });
@@ -732,7 +824,6 @@ app.get("/mp/estado", (req, res) => {
   res.json({ ok:true, conectado });
 });
 
-// Callback al que vuelve Mercado Pago con ?code=...&state=complejoId
 app.get("/mp/callback", async (req, res) => {
   const { code, state: complejoId } = req.query;
   if (!code || !complejoId) {
@@ -756,129 +847,34 @@ app.get("/mp/callback", async (req, res) => {
     const data = await r.json();
     if (!r.ok || !data.access_token) {
       console.error("OAuth error:", data);
-      return res.status(400).send("❌ No se pudo conectar Mercado Pago.");
+      return res.status(400).send("❌ No se pudo completar la conexión con Mercado Pago.");
     }
 
-    // Guardamos credenciales OAuth por complejo (incluye refresh_token)
-    const creds = leerCredsMP_OAUTH(); // tu helper que lee el JSON de credenciales
-    creds[complejoId] = creds[complejoId] || {};
-    creds[complejoId].oauth = {
+    // Guardamos tokens en credenciales_mp.json
+    const all = leerCredsMP_OAUTH();
+    all[complejoId] = all[complejoId] || {};
+    all[complejoId].oauth = {
       access_token: data.access_token,
-      refresh_token: data.refresh_token,           // IMPORTANTE para poder renovar
-      user_id: data.user_id || data.user_id_in_site || null,
-      token_type: data.token_type || "Bearer",
-      scope: data.scope || "",
-      live_mode: !!data.live_mode,
-      expires_in: data.expires_in || null,
-      updated_at: Date.now()                        // marca temporal local
+      refresh_token: data.refresh_token,
+      user_id: data.user_id,
+      scope: data.scope,
+      token_type: data.token_type,
+      live_mode: data.live_mode,
+      expires_in: data.expires_in,
+      obtained_at: Date.now()
     };
-    escribirCredsMP_OAUTH(creds); // tu helper que persiste
+    escribirCredsMP_OAUTH(all);
 
-    // Mini página con botones para volver al onboarding o ir a reservar
-    const slug = encodeURIComponent(complejoId);
-    const base = process.env.PUBLIC_URL; // ej: https://ramiroaldeco.github.io/recomplejos-frontend
-    const urlOnboarding = `${base}/onboarding.html?complejo=${slug}&mp=ok`;
-    const urlFrontend   = `${base}/frontend.html?complejo=${slug}`;
-
-    return res
-      .status(200)
-      .send(`<!doctype html>
-<html lang="es"><head>
-<meta charset="utf-8">
-<title>Mercado Pago conectado</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-  body{font-family:system-ui,Segoe UI,Arial,sans-serif;padding:28px;background:#f7fff9}
-  .card{max-width:620px;margin:0 auto;background:#fff;border-radius:12px;padding:24px;
-        box-shadow:0 4px 16px rgba(0,0,0,.08);text-align:center}
-  h1{color:#0a7f46;margin:0 0 8px}
-  p{color:#333}
-  .row{display:flex;gap:12px;justify-content:center;margin-top:18px;flex-wrap:wrap}
-  a.button{display:inline-block;padding:10px 14px;border-radius:8px;text-decoration:none}
-  a.primary{background:#0b8457;color:#fff}
-  a.secondary{background:#eef7f2;color:#0b8457;border:1px solid #0b8457}
-  small{color:#666;display:block;margin-top:14px}
-</style>
-</head><body>
-  <div class="card">
-    <h1>✅ Mercado Pago conectado</h1>
-    <p>Listo. Ya podés cobrar las señas para <strong>${complejoId}</strong>.</p>
-    <div class="row">
-      <a class="button primary"   href="${urlOnboarding}">Volver al Onboarding</a>
-      <a class="button secondary" href="${urlFrontend}">Ir a Reservar</a>
-    </div>
-    <small>No olvides guardar los datos del complejo en el Onboarding.</small>
-  </div>
-</body></html>`);
+    res.send("✅ Mercado Pago conectado. Ya podés cerrar esta pestaña.");
   } catch (e) {
-    console.error(e);
-    return res.status(500).send("❌ Error interno al conectar Mercado Pago.");
+    console.error("Callback OAuth MP error:", e?.message || e);
+    res.status(500).send("❌ Error inesperado conectando Mercado Pago.");
   }
-});
-
-// ---- DEBUG: credenciales guardadas por complejo (NO expone tokens completos)
-app.get("/debug/credenciales", (_req, res) => {
-  try {
-    const cred = leerJSON(pathCreds); // usa tu helper y pathCreds que ya tenés
-    const resumen = {};
-    for (const k of Object.keys(cred)) {
-      const c = cred[k] || {};
-      resumen[k] = {
-        tieneOAuth: !!(c.oauth && c.oauth.access_token),
-        tieneManual: !!(c.access_token || c.mp_access_token),
-        ultimoUpdate: c.oauth?.updated_at || null
-      };
-    }
-    res.json({ ok: true, credenciales: resumen });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e?.message || String(e) });
-  }
-});
-
-// ---- DEBUG: qué token usaría para un complejo (solo preview)
-app.get("/debug/token", (req, res) => {
-  const { complejoId } = req.query || {};
-  if (!complejoId) return res.status(400).json({ error: "falta complejoId" });
-
-  const cred = leerJSON(pathCreds);
-  const c = cred[complejoId] || {};
-  const tok =
-    (c.oauth && c.oauth.access_token) ||
-    c.access_token ||
-    c.mp_access_token ||
-    process.env.MP_ACCESS_TOKEN ||
-    "";
-
-  return res.json({
-    complejoId,
-    tieneOAuth: !!(c.oauth && c.oauth.access_token),
-    tieneManual: !!(c.access_token || c.mp_access_token),
-    usaEnv: !((c.oauth && c.oauth.access_token) || c.access_token || c.mp_access_token) && !!process.env.MP_ACCESS_TOKEN,
-    token_preview: tok ? (tok.slice(0, 8) + "..." + tok.slice(-4)) : "(vacío)"
-  });
 });
 
 // =======================
-// END
+// Arranque del server
 // =======================
 app.listen(PORT, () => {
-  console.log(`Servidor corriendo en http://localhost:${PORT}`);
+  console.log(`Server escuchando en http://0.0.0.0:${PORT}`);
 });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
