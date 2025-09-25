@@ -1,0 +1,277 @@
+// dao.js
+const pool = require('./db');
+const bcrypt = require('bcrypt');
+
+/* ===================== COMPLEJOS ===================== */
+
+// Devuelve objeto { [id]: {nombre, ciudad, maps, servicios, imagenes, horarios, canchas} }
+// para que tu frontend actual (inicio/onboarding/micomplejo) siga funcionando sin romper.
+async function listarComplejos() {
+  // Traigo complejos
+  const { rows: cx } = await pool.query(
+    `select id, name, city, maps_iframe, servicios, imagenes, clave_legacy from complexes order by name`
+  );
+
+  // Traigo canchas y horarios en lote
+  const { rows: fields } = await pool.query(
+    `select id, complex_id, name, jugadores, precio_pp, senia from fields order by id`
+  );
+  const { rows: sched } = await pool.query(
+    `select complex_id, day_of_week, desde, hasta from schedules order by complex_id, day_of_week`
+  );
+
+  // Armo salida compatible
+  const out = {};
+  for (const c of cx) {
+    out[c.id] = {
+      clave: c.clave_legacy || "",           // compat (login actual)
+      nombre: c.name,
+      ciudad: c.city,
+      maps: c.maps_iframe,
+      servicios: c.servicios || [],
+      imagenes: c.imagenes || [],
+      canchas: [],
+      horarios: {}                           // {"Lunes": {desde, hasta}, ...}
+    };
+  }
+
+  const nombreDia = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Domingo"]; // corregimos luego
+  for (const s of sched) {
+    const d = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Domingo"][s.day_of_week] || "Lunes";
+    if (out[s.complex_id]) {
+      out[s.complex_id].horarios[d] = { desde: s.desde.slice(0,5), hasta: s.hasta.slice(0,5) };
+    }
+  }
+
+  for (const f of fields) {
+    if (out[f.complex_id]) {
+      out[f.complex_id].canchas.push({
+        nombre: f.name,
+        jugadores: Number(f.jugadores||0),
+        precioPP: Number(f.precio_pp||0),     // compat con micomplejo
+        senia: Number(f.senia||0)
+      });
+    }
+  }
+
+  return out;
+}
+
+// Upsert masivo del objeto “merged” que hoy manda onboarding.html
+// merged = { [id]: { nombre, ciudad, maps, servicios, imagenes, horarios, canchas, clave } }
+async function guardarDatosComplejos(merged) {
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+
+    for (const id of Object.keys(merged||{})) {
+      const d = merged[id];
+
+      // complexes
+      await client.query(`
+        insert into complexes (id, name, city, maps_iframe, servicios, imagenes, clave_legacy)
+        values ($1,$2,$3,$4,$5,$6,$7)
+        on conflict (id) do update set
+          name=excluded.name,
+          city=excluded.city,
+          maps_iframe=excluded.maps_iframe,
+          servicios=excluded.servicios,
+          imagenes=excluded.imagenes,
+          clave_legacy=excluded.clave_legacy
+      `, [
+        id, d.nombre||id, d.ciudad||null, d.maps||null,
+        JSON.stringify(d.servicios||[]),
+        JSON.stringify(d.imagenes||[]),
+        d.clave||null
+      ]);
+
+      // schedules: borro y vuelvo a cargar
+      if (d.horarios) {
+        await client.query(`delete from schedules where complex_id=$1`, [id]);
+        const orden = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"];
+        for (let i=0;i<orden.length;i++){
+          const nd = orden[i];
+          const h = d.horarios[nd] || {};
+          const desde = h.desde || '18:00';
+          const hasta = h.hasta || '23:00';
+          // mapear i a 0..6 con 0=Dom
+          const map = { "Domingo":0,"Lunes":1,"Martes":2,"Miércoles":3,"Jueves":4,"Viernes":5,"Sábado":6 };
+          const dow = map[nd] ?? 1;
+          await client.query(
+            `insert into schedules (complex_id, day_of_week, desde, hasta)
+             values ($1,$2,$3,$4)`,
+            [id, dow, desde, hasta]
+          );
+        }
+      }
+
+      // fields: borro y recargo
+      if (Array.isArray(d.canchas)) {
+        await client.query(`delete from fields where complex_id=$1`, [id]);
+        for (const c of d.canchas) {
+          const precioPP = Number(c.precioPP ?? c.precioPorJugador ?? c.precio_total ?? 0);
+          const senia    = Number(c.senia ?? 0);
+          const jug      = Number(c.jugadores ?? 0);
+          await client.query(
+            `insert into fields (complex_id, name, jugadores, precio_pp, senia)
+             values ($1,$2,$3,$4,$5)`,
+            [id, c.nombre||'Cancha', jug, precioPP, senia]
+          );
+        }
+      }
+    }
+
+    await client.query('commit');
+    return { ok: true };
+  } catch (e) {
+    await client.query('rollback');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+/* ===================== LOGIN DUEÑO (compat) ===================== */
+// Mantiene el login actual usando “clave_legacy” hasta que migremos a owners/pass_hash
+async function loginDueno(complejoId, password) {
+  const { rows } = await pool.query(
+    `select clave_legacy from complexes where id=$1`, [complejoId]
+  );
+  if (!rows.length) return { ok:false };
+  return { ok: (rows[0].clave_legacy||'') === (password||'') };
+}
+
+/* ===================== RESERVAS (compat objeto) ===================== */
+
+// Convierte tabla reservations → objeto { "slug-Cancha-YYYY-MM-DD-HH:mm": {...} }
+async function listarReservasObjCompat() {
+  const q = `
+    select r.*, f.name as cancha
+      from reservations r
+      join fields f on f.id = r.field_id
+  `;
+  const { rows } = await pool.query(q);
+  const out = {};
+  for (const r of rows) {
+    const fechaISO = r.fecha.toISOString().slice(0,10);
+    const hh = r.hora.toString().slice(0,5);
+    const key = `${r.complex_id}-${r.cancha}-${fechaISO}-${hh}`;
+    const item = {
+      status: r.status,
+      nombre: r.nombre || "",
+      telefono: r.telefono || "",
+      monto: r.monto || undefined,
+      preference_id: r.preference_id || undefined,
+      payment_id: r.payment_id || undefined
+    };
+    if (r.status === 'blocked') item.bloqueado = true;
+    if (r.hold_until) item.holdUntil = r.hold_until.getTime();
+    out[key] = item;
+  }
+  return out;
+}
+
+// Recibe el objeto completo (como hoy /guardarReservas) y lo refleja en la DB.
+// Para simplificar el primer paso: borra y recrea; luego lo refinamos a "diff".
+async function guardarReservasObjCompat(obj) {
+  const client = await pool.connect();
+  try {
+    await client.query('begin');
+
+    await client.query('delete from reservations');
+
+    for (const key of Object.keys(obj||{})) {
+      // key: slug-Cancha-YYYY-MM-DD-HH:mm
+      const parts = key.split('-');
+      if (parts.length < 4) continue;
+      const complex_id = parts[0];
+      const cancha = parts[1];
+      // fecha puede tener guiones, tomamos los últimos dos segmentos para fecha y hora
+      const tail = parts.slice(2).join('-');
+      const m = tail.match(/(\d{4}-\d{2}-\d{2})-(\d{2}:\d{2})$/);
+      if (!m) continue;
+      const fechaISO = m[1];
+      const hora = m[2];
+
+      const r = obj[key];
+
+      const f = await client.query(
+        `select id from fields where complex_id=$1 and name=$2 limit 1`,
+        [complex_id, cancha]
+      );
+      if (!f.rowCount) continue;
+      const field_id = f.rows[0].id;
+
+      let status = r.status || (r.bloqueado ? 'blocked' : 'manual');
+
+      await client.query(`
+        insert into reservations (complex_id, field_id, fecha, hora, status, nombre, telefono, monto, preference_id, payment_id, hold_until)
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, ${r.holdUntil ? 'to_timestamp($11/1000)' : 'null'})
+      `, [
+        complex_id, field_id, fechaISO, hora, status,
+        r.nombre||null, r.telefono||null, r.monto||null,
+        r.preference_id||null, r.payment_id||null,
+        r.holdUntil || null
+      ]);
+    }
+
+    await client.query('commit');
+    return { ok:true };
+  } catch (e) {
+    await client.query('rollback');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+/* ===================== UTIL PARA HOLDS/PAGOS (opcional inmediato) ===================== */
+async function crearHold({ complex_id, cancha, fechaISO, hora, nombre, telefono, monto, holdMinutes=10 }) {
+  const { rows } = await pool.query(
+    `select id from fields where complex_id=$1 and name=$2 limit 1`,
+    [complex_id, cancha]
+  );
+  if (!rows.length) return false;
+  const field_id = rows[0].id;
+
+  const ins = await pool.query(`
+    insert into reservations (complex_id, field_id, fecha, hora, status, nombre, telefono, monto, hold_until)
+    values ($1,$2,$3,$4,'hold',$5,$6,$7, now() + ($8 || ' minutes')::interval)
+    on conflict (complex_id,field_id,fecha,hora)
+      where status in ('hold','pending','approved','manual','blocked')
+      do nothing
+    returning id
+  `, [complex_id, field_id, fechaISO, hora, nombre||null, telefono||null, monto||null, holdMinutes]);
+
+  return ins.rowCount > 0;
+}
+
+async function actualizarReservaTrasPago({ preference_id, payment_id, status, nombre, telefono }) {
+  const { rowCount } = await pool.query(`
+    update reservations
+       set status = case
+                      when $1='approved' then 'approved'
+                      when $1 in ('rejected','cancelled') then 'cancelled'
+                      else 'pending'
+                    end,
+           payment_id = $2,
+           preference_id = coalesce(preference_id,$3),
+           nombre = coalesce(nombre,$4),
+           telefono = coalesce(telefono,$5),
+           hold_until = null
+     where preference_id = $3
+  `, [status, payment_id, preference_id, nombre||null, telefono||null]);
+  return rowCount > 0;
+}
+
+module.exports = {
+  listarComplejos,
+  guardarDatosComplejos,
+  loginDueno,
+
+  listarReservasObjCompat,
+  guardarReservasObjCompat,
+
+  crearHold,
+  actualizarReservaTrasPago
+};
