@@ -52,7 +52,8 @@ function tokenPara(complejoId) {
 }
 
 function mpClient(complejoId) {
-  return new MercadoPagoConfig({ access_token: tokenPara(complejoId) });
+  // no se usa, lo dejo por compat
+  return new MercadoPagoConfig({ accessToken: tokenPara(complejoId) });
 }
 
 // Helpers de credenciales OAuth (persistencia en JSON)
@@ -221,9 +222,6 @@ function entre(hora, desde, hasta){
 // valida: no pasado, dentro de horario configurado y cancha existente
 function validarTurno({complejoId, canchaNombre, fecha, hora}){
   // *** OJO: ahora los datos de complejos salen de la DB ***
-  // Para validar horarios/canchas rápido, leo el objeto compat desde la DB:
-  // (equivalente a leer pathDatos pero desde Postgres)
-  // Si quisieras mayor performance, podés traer solo lo necesario.
   const datos = _cacheComplejosCompat; // cache breve poblado por /datos_complejos
   const info = datos?.[complejoId];
   if(!info) return {ok:false, error:"Complejo inexistente"};
@@ -365,7 +363,6 @@ async function enviarWhatsApp(complejoId, texto) {
   const phoneId = process.env.WHATSAPP_PHONE_ID;
   if (!token || !phoneId) return; // no configurado
 
-  // ahora que /datos_complejos sale de BD, puedo usar cache o env
   const datos = _cacheComplejosCompat;
   const para = (datos?.[complejoId]?.whatsappDueño) || process.env.ADMIN_WHATSAPP_TO;
   if (!para) return;
@@ -559,11 +556,11 @@ app.post("/crear-preferencia", async (req, res) => {
   };
   escribirJSON(pathReservas, reservas);
 
-  // Helper local: crea la preferencia usando el token indicado
+  // Helper local: crea la preferencia usando el token indicado (devuelvo forma segura)
   const crearCon = async (accessToken) => {
     const mp = new MercadoPagoConfig({ accessToken });
     const preference = new Preference(mp);
-    return await preference.create({
+    const r = await preference.create({
       body: {
         items: [{
           title: titulo || "Seña de reserva",
@@ -581,6 +578,11 @@ app.post("/crear-preferencia", async (req, res) => {
         metadata: { clave, complejoId, nombre: nombre || "", telefono: telefono || "" }
       }
     });
+    return {
+      id: r?.id || r?.body?.id || r?.response?.id,
+      init_point: r?.init_point || r?.body?.init_point || r?.response?.init_point,
+      sandbox_init_point: r?.sandbox_init_point || r?.body?.sandbox_init_point || null
+    };
   };
 
   try {
@@ -638,7 +640,7 @@ app.post("/crear-preferencia", async (req, res) => {
 
     // 3) Preferencia OK
     reservas[clave] = {
-      ...reservas[clave],
+      ...(reservas[clave] || {}),
       status: "hold",
       preference_id: result.id,
       init_point: result.init_point,
@@ -769,7 +771,7 @@ app.post("/webhook-mp", async (req, res) => {
 
     // MP envía { action, data: { id }, type } o similar
     const body = req.body || {};
-    const paymentId = body?.data?.id || body?.id;
+    const paymentId = body?.data?.id || body?.id || body?.resource?.split?.("/")?.pop?.();
     if (!paymentId) return;
 
     // Consultamos el pago para conocer status y preference_id
@@ -781,7 +783,6 @@ app.post("/webhook-mp", async (req, res) => {
       if (cred[k]?.access_token)        tokensATestar.push(cred[k].access_token);
       if (cred[k]?.mp_access_token)     tokensATestar.push(cred[k].mp_access_token);
     }
-    tokensATestar.push(""); // por si no hay nada
 
     let pago = null;
     for (const t of tokensATestar) {
