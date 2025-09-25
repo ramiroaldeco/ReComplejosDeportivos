@@ -1,5 +1,6 @@
 // ---- Cargas básicas
-require("dotenv").config();
+require('dotenv').config();
+const dao = require('./dao');                   // <== NUEVO: capa de datos a Postgres
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
@@ -167,7 +168,7 @@ function mpClientCon(token) {
 }
 
 // =======================
-// HOLD anti doble-reserva
+// HOLD anti doble-reserva (LEGADO sobre archivo; lo dejo por compat)
 // =======================
 const HOLD_MIN = parseInt(process.env.HOLD_MIN || "10", 10); // 10 min default
 
@@ -219,8 +220,12 @@ function entre(hora, desde, hasta){
 
 // valida: no pasado, dentro de horario configurado y cancha existente
 function validarTurno({complejoId, canchaNombre, fecha, hora}){
-  const datos = leerJSON(pathDatos);
-  const info = datos[complejoId];
+  // *** OJO: ahora los datos de complejos salen de la DB ***
+  // Para validar horarios/canchas rápido, leo el objeto compat desde la DB:
+  // (equivalente a leer pathDatos pero desde Postgres)
+  // Si quisieras mayor performance, podés traer solo lo necesario.
+  const datos = _cacheComplejosCompat; // cache breve poblado por /datos_complejos
+  const info = datos?.[complejoId];
   if(!info) return {ok:false, error:"Complejo inexistente"};
 
   // cancha existe
@@ -251,25 +256,43 @@ function claveDe({complejoId, canchaNombre, fecha, hora}){
 }
 
 // =======================
-// RUTAS EXISTENTES (no tocamos nombres) + nuevas
+// RUTAS EXISTENTES (con BD) + NUEVAS
 // =======================
 
-// Datos del complejo (sin caché)
-app.get("/datos_complejos", (_req, res) => {
-  res.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
-  res.json(leerJSON(pathDatos));
+// Caché pequeñito para validar sin consultar DB a cada request (se refresca en /datos_complejos)
+let _cacheComplejosCompat = {};
+
+// Datos del complejo (sin caché) -> AHORA DESDE BD
+app.get("/datos_complejos", async (_req, res) => {
+  try {
+    res.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+    const d = await dao.listarComplejos();     // <== BD
+    _cacheComplejosCompat = d;                 // refresco cache para validarTurno
+    res.json(d);
+  } catch (e) {
+    console.error("DB /datos_complejos", e);
+    // fallback de emergencia al archivo si algo falla
+    res.json(leerJSON(pathDatos));
+  }
 });
 
-// Guardar datos (MERGE, para que onboarding no pise otros complejos)
-app.post("/guardarDatos", (req, res) => {
-  const actuales = leerJSON(pathDatos);
-  const nuevos = req.body || {};
-  const merged = { ...actuales, ...nuevos };
-  escribirJSON(pathDatos, merged);
-  res.json({ ok: true });
+// Guardar datos (MERGE) -> AHORA A BD (mantengo archivo como backup)
+app.post("/guardarDatos", async (req, res) => {
+  try {
+    const nuevos = req.body || {};
+    await dao.guardarDatosComplejos(nuevos);   // <== BD
+    // También actualizo el archivo como respaldo (opcional)
+    const actuales = leerJSON(pathDatos);
+    const merged = { ...actuales, ...nuevos };
+    escribirJSON(pathDatos, merged);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("DB /guardarDatos", e);
+    res.status(500).json({ error: "DB error al guardar" });
+  }
 });
 
-// NUEVA: alta/actualización de credenciales de MP por complejo
+// NUEVA: alta/actualización de credenciales de MP por complejo (sigue en JSON)
 app.post("/alta-credencial", (req, res) => {
   const { id, mp_access_token, access_token } = req.body || {};
   if (!id || !(mp_access_token || access_token)) {
@@ -277,18 +300,36 @@ app.post("/alta-credencial", (req, res) => {
   }
   const cred = leerJSON(pathCreds);
   cred[id] = cred[id] || {};
-  // normalizamos a 'access_token' (el server lo busca así)
   cred[id].access_token = access_token || mp_access_token;
   escribirJSON(pathCreds, cred);
   res.json({ ok: true });
 });
 
-// Reservas (objeto completo)
-app.get("/reservas", (_req, res) => {
-  res.json(leerJSON(pathReservas));
+// Reservas (objeto completo) -> AHORA DESDE BD
+app.get("/reservas", async (_req, res) => {
+  try {
+    const r = await dao.listarReservasObjCompat(); // <== BD
+    res.json(r);
+  } catch (e) {
+    console.error("DB /reservas", e);
+    res.json(leerJSON(pathReservas)); // fallback
+  }
 });
 
-// Guardar UNA reserva directa (legado)
+// Guardar TODAS las reservas (bloquear/cancelar desde micomplejo.html) -> AHORA A BD
+app.post("/guardarReservas", async (req, res) => {
+  try {
+    await dao.guardarReservasObjCompat(req.body || {}); // <== BD
+    // opcional: backup a archivo
+    escribirJSON(pathReservas, req.body || {});
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("DB /guardarReservas", e);
+    res.status(500).json({ error: "DB error al guardar" });
+  }
+});
+
+// Guardar UNA reserva directa (legado) -> mantengo archivo (no lo usás en front nuevo)
 app.post("/guardarReserva", (req, res) => {
   const { clave, nombre, telefono } = req.body;
   const reservas = leerJSON(pathReservas);
@@ -298,20 +339,22 @@ app.post("/guardarReserva", (req, res) => {
   res.json({ ok: true });
 });
 
-// Guardar TODAS las reservas (bloquear/cancelar desde micomplejo.html)
-app.post("/guardarReservas", (req, res) => {
-  escribirJSON(pathReservas, req.body || {});
-  res.json({ ok: true });
-});
-
-// Login simple de dueño (slug + clave en datos_complejos.json)
-app.post("/login", (req, res) => {
+// Login simple de dueño (slug + clave) -> AHORA CONTRA BD (clave_legacy)
+app.post("/login", async (req, res) => {
   const { complejo, password } = req.body || {};
-  const datos = leerJSON(pathDatos);
-  if (!datos[complejo]) return res.status(404).json({ error: "Complejo inexistente" });
-  const ok = (datos[complejo].clave || "") === (password || "");
-  if (!ok) return res.status(401).json({ error: "Contraseña incorrecta" });
-  res.json({ ok: true });
+  try {
+    const ok = await dao.loginDueno(complejo, password); // <== BD
+    if (!ok.ok) return res.status(401).json({ error: "Contraseña incorrecta" });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("DB /login", e);
+    // fallback contra archivo
+    const datos = leerJSON(pathDatos);
+    if (!datos[complejo]) return res.status(404).json({ error: "Complejo inexistente" });
+    const okArch = (datos[complejo].clave || "") === (password || "");
+    if (!okArch) return res.status(401).json({ error: "Contraseña incorrecta" });
+    res.json({ ok: true, via: "archivo" });
+  }
 });
 
 // =======================
@@ -322,7 +365,8 @@ async function enviarWhatsApp(complejoId, texto) {
   const phoneId = process.env.WHATSAPP_PHONE_ID;
   if (!token || !phoneId) return; // no configurado
 
-  const datos = leerJSON(pathDatos);
+  // ahora que /datos_complejos sale de BD, puedo usar cache o env
+  const datos = _cacheComplejosCompat;
   const para = (datos?.[complejoId]?.whatsappDueño) || process.env.ADMIN_WHATSAPP_TO;
   if (!para) return;
 
@@ -352,7 +396,7 @@ async function enviarEmail(complejoId, asunto, html) {
   const from = process.env.RESEND_FROM;
   if (!key || !from) return;
 
-  const datos = leerJSON(pathDatos);
+  const datos = _cacheComplejosCompat;
   const para = (datos?.[complejoId]?.emailDueño) || process.env.ADMIN_EMAIL;
   if (!para) return;
 
@@ -400,29 +444,44 @@ Seña: $${monto}`;
 // NUEVOS ENDPOINTS: disponibilidad + estado-reserva
 // =======================
 
-// ¿Está libre este turno exacto?
-app.get("/disponible", (req,res)=>{
+// ¿Está libre este turno exacto? -> chequear contra DB
+app.get("/disponible", async (req,res)=>{
   const { complejoId, cancha, fecha, hora } = req.query || {};
   const v = validarTurno({complejoId, canchaNombre: cancha, fecha, hora});
   if(!v.ok) return res.json({ ok:false, motivo:v.error });
 
-  const reservas = leerJSON(pathReservas);
-  const clave = claveDe({complejoId, canchaNombre: cancha, fecha, hora});
-  const r = reservas[clave];
-
-  // ocupa si está approved o hold vigente
-  const ocupado = Boolean(r && (r.status === "approved" || estaHoldActiva(r)));
-  return res.json({ ok:true, libre: !ocupado });
+  try {
+    const obj = await dao.listarReservasObjCompat(); // BD
+    const clave = claveDe({complejoId, canchaNombre: cancha, fecha, hora});
+    const r = obj[clave];
+    const ocupado = Boolean(r && (r.status === "approved" || (r.status === "hold" && r.holdUntil && Date.now() < r.holdUntil)));
+    return res.json({ ok:true, libre: !ocupado });
+  } catch (e) {
+    // fallback a archivo
+    const reservas = leerJSON(pathReservas);
+    const clave = claveDe({complejoId, canchaNombre: cancha, fecha, hora});
+    const r = reservas[clave];
+    const ocupado = Boolean(r && (r.status === "approved" || estaHoldActiva(r)));
+    return res.json({ ok:true, libre: !ocupado, via:"archivo" });
+  }
 });
 
-// Estado de una reserva por clave
-app.get("/estado-reserva", (req,res)=>{
+// Estado de una reserva por clave -> desde DB
+app.get("/estado-reserva", async (req,res)=>{
   const { clave } = req.query || {};
   if(!clave) return res.status(400).json({ error:"Falta clave" });
-  const reservas = leerJSON(pathReservas);
-  const r = reservas[clave];
-  if(!r) return res.json({ ok:true, existe:false, status:"none" });
-  return res.json({ ok:true, existe:true, status:r.status, data:r });
+  try {
+    const obj = await dao.listarReservasObjCompat();
+    const r = obj[clave];
+    if(!r) return res.json({ ok:true, existe:false, status:"none" });
+    return res.json({ ok:true, existe:true, status:r.status, data:r });
+  } catch (e) {
+    // fallback archivo
+    const reservas = leerJSON(pathReservas);
+    const r = reservas[clave];
+    if(!r) return res.json({ ok:true, existe:false, status:"none", via:"archivo" });
+    return res.json({ ok:true, existe:true, status:r.status, data:r, via:"archivo" });
+  }
 });
 
 // =======================
@@ -464,15 +523,28 @@ app.post("/crear-preferencia", async (req, res) => {
     return res.status(400).json({ error: "Faltan cancha/fecha/hora (o clave)" });
   }
 
-  const reservas = leerJSON(pathReservas);
-
-  // ¿ya reservado? (aprobado o con HOLD vigente)
-  const existente = reservas[clave];
-  if (existente && (existente.status === "approved" || estaHoldActiva(existente))) {
-    return res.status(409).json({ error: "El turno ya está tomado" });
+  // ===== NUEVO: HOLD en la BD (anti doble-reserva por concurrencia) =====
+  try {
+    const okHold = await dao.crearHold({
+      complex_id: complejoId,
+      cancha,
+      fechaISO: fecha,
+      hora,
+      nombre,
+      telefono,
+      monto,
+      holdMinutes: HOLD_MIN
+    });
+    if (!okHold) {
+      return res.status(409).json({ error: "El turno ya está tomado" });
+    }
+  } catch (e) {
+    console.error("DB crear hold:", e);
+    return res.status(500).json({ error: "No se pudo bloquear el turno" });
   }
 
-  // HOLD temporal para bloquear el turno mientras se crea la preferencia
+  // Mantengo también el HOLD en archivo como compat (por si mirás admin viejo)
+  const reservas = leerJSON(pathReservas);
   const holdUntil = Date.now() + HOLD_MIN * 60 * 1000;
   reservas[clave] = {
     status: "hold",
@@ -517,9 +589,11 @@ app.post("/crear-preferencia", async (req, res) => {
     try {
       tokenActual = await tokenPara(complejoId);
     } catch (e) {
-      // Liberar HOLD si el complejo no tiene OAuth
-      delete reservas[clave];
-      escribirJSON(pathReservas, reservas);
+      // Liberar HOLD si el complejo no tiene OAuth (en archivo y DB)
+      const rr = leerJSON(pathReservas);
+      delete rr[clave];
+      escribirJSON(pathReservas, rr);
+      // liberar en DB: (dejamos que expire solo o podríamos marcar cancelado)
 
       if (e.code === "NO_OAUTH") {
         return res.status(409).json({
@@ -534,25 +608,16 @@ app.post("/crear-preferencia", async (req, res) => {
     try {
       result = await crearCon(tokenActual);
     } catch (err) {
-      // Si el token está inválido/expirado (401 o message=invalid_token) -> refrescamos y reintentamos UNA VEZ
       const status = err?.status || err?.body?.status;
       const msg = (err?.body && (err.body.message || err.body.error)) || err?.message || "";
       if (status === 401 || /invalid_token/i.test(msg)) {
-        console.warn("Token MP inválido/expirado -> refrescando y reintentando…");
         try {
           const tokenNuevo = await refreshTokenMP(complejoId);
           result = await crearCon(tokenNuevo);
         } catch (err2) {
-          // Falló también tras refrescar: soltamos el HOLD y devolvemos error
           const rr = leerJSON(pathReservas);
           delete rr[clave];
           escribirJSON(pathReservas, rr);
-
-          console.error("MP error crear-preferencia (post-refresh):", {
-            message: err2?.message,
-            body: err2?.body || err2?.response || err2
-          });
-
           const detalle2 =
             (err2?.body && (err2.body.message || err2.body.error || (Array.isArray(err2.body.cause) && err2.body.cause[0]?.description))) ||
             err2?.message ||
@@ -560,16 +625,9 @@ app.post("/crear-preferencia", async (req, res) => {
           return res.status(400).json({ error: detalle2 });
         }
       } else {
-        // Otro error: soltamos HOLD y devolvemos
         const rr = leerJSON(pathReservas);
         delete rr[clave];
         escribirJSON(pathReservas, rr);
-
-        console.error("MP error crear-preferencia:", {
-          message: err?.message,
-          body: err?.body || err?.response || err
-        });
-
         const detalle =
           (err?.body && (err.body.message || err.body.error || (Array.isArray(err.body.cause) && err.body.cause[0]?.description))) ||
           err?.message ||
@@ -578,10 +636,10 @@ app.post("/crear-preferencia", async (req, res) => {
       }
     }
 
-    // 3) Si llegamos acá, tenemos 'result' OK (sea del 1er intento o del reintento)
+    // 3) Preferencia OK
     reservas[clave] = {
       ...reservas[clave],
-      status: "hold",                  // se mantiene en HOLD hasta el webhook
+      status: "hold",
       preference_id: result.id,
       init_point: result.init_point,
       sandbox_init_point: result.sandbox_init_point || null,
@@ -589,22 +647,16 @@ app.post("/crear-preferencia", async (req, res) => {
     };
     escribirJSON(pathReservas, reservas);
 
-    // Devolver al frontend lo necesario para redirigir al pago
     return res.json({
       preference_id: result.id,
       init_point: result.init_point
     });
 
   } catch (e) {
-    // Cualquier otra excepción: liberar HOLD
+    // Cualquier otra excepción: liberar HOLD archivo
     const rr = leerJSON(pathReservas);
     delete rr[clave];
     escribirJSON(pathReservas, rr);
-
-    console.error("MP error crear-preferencia (catch outer):", {
-      message: e?.message,
-      body: e?.body || e?.response || e
-    });
 
     const detalle =
       (e?.body && (e.body.message || e.body.error || (Array.isArray(e.body.cause) && e.body.cause[0]?.description))) ||
@@ -756,7 +808,20 @@ app.post("/webhook-mp", async (req, res) => {
     }
     if (!clave) return;
 
-    // Actualizamos la reserva
+    // ==== ACTUALIZAR EN DB ====
+    try {
+      await dao.actualizarReservaTrasPago({
+        preference_id: prefId,
+        payment_id: pago?.id,
+        status,
+        nombre: pago?.metadata?.nombre || null,
+        telefono: pago?.metadata?.telefono || null
+      });
+    } catch (e) {
+      console.error("DB actualizar tras pago:", e);
+    }
+
+    // ==== Mantener compat en archivo (para paneles viejos) ====
     const reservas = leerJSON(pathReservas);
     const r = reservas[clave] || {};
     r.preference_id = prefId || r.preference_id;
@@ -778,11 +843,9 @@ app.post("/webhook-mp", async (req, res) => {
       };
       escribirJSON(pathReservas, { ...reservas, [clave]: r });
       notificarAprobado(infoNoti).catch(()=>{});
-      // limpiar hold
       delete r.holdUntil;
 
     } else if (status === "rejected" || status === "cancelled") {
-      // liberar el turno
       delete reservas[clave];
       escribirJSON(pathReservas, reservas);
       return;
@@ -793,7 +856,6 @@ app.post("/webhook-mp", async (req, res) => {
       return;
     }
 
-    // guardar final por si faltaba algo
     escribirJSON(pathReservas, { ...reservas, [clave]: r });
   } catch (e) {
     console.error("Error en webhook:", e?.message || e);
