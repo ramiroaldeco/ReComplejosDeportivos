@@ -51,9 +51,9 @@ function tokenPara(complejoId) {
   return tok;
 }
 
-function mpClient(complejoId) {
-  // no se usa, lo dejo por compat
-  return new MercadoPagoConfig({ accessToken: tokenPara(complejoId) });
+function mpClient(conToken) {
+  // helper directo por si lo necesitás en algún lado
+  return new MercadoPagoConfig({ accessToken: conToken });
 }
 
 // Helpers de credenciales OAuth (persistencia en JSON)
@@ -163,7 +163,6 @@ async function refreshTokenMP(complejoId) {
 
 // SDK con token que le pasemos
 function mpClientCon(token) {
-  const { MercadoPagoConfig, Preference } = require("mercadopago");
   const mp = new MercadoPagoConfig({ accessToken: token });
   return { Preference: new Preference(mp) };
 }
@@ -521,51 +520,53 @@ app.post("/crear-preferencia", async (req, res) => {
   }
 
   // ===== HOLD (DB con fallback a archivo) =====
-const claveReserva = clave;
-try {
-  const okHold = await dao.crearHold({
-    complex_id: complejoId,
-    cancha,
-    fechaISO: fecha,
-    hora,
-    nombre,
-    telefono,
-    monto,
-    holdMinutes: HOLD_MIN
-  });
-  if (!okHold) {
-    return res.status(409).json({ error: "El turno ya está tomado" });
-  }
-} catch (e) {
-  console.error("DB crear hold falló, uso archivo:", e?.message || e);
-  const rr = leerJSON(pathReservas);
-  const ya = rr[claveReserva];
-  const ahora = Date.now();
+  const claveReserva = clave;
+  try {
+    const okHold = await dao.crearHold({
+      complex_id: complejoId,
+      cancha,
+      fechaISO: fecha,
+      hora,
+      nombre,
+      telefono,
+      monto,
+      holdMinutes: HOLD_MIN
+    });
+    if (!okHold) {
+      return res.status(409).json({ error: "El turno ya está tomado" });
+    }
+  } catch (e) {
+    console.error("DB crear hold falló, uso archivo:", e?.message || e);
+    const rr = leerJSON(pathReservas);
+    const ya = rr[claveReserva];
+    const ahora = Date.now();
 
-  // si ya estaba tomado (approved) o con hold activo → 409
-  if (ya && (ya.status === "approved" || (ya.status === "hold" && ya.holdUntil && ya.holdUntil > ahora))) {
-    return res.status(409).json({ error: "El turno ya está tomado" });
+    // si ya estaba tomado (approved) o con hold activo → 409
+    if (ya && (ya.status === "approved" || (ya.status === "hold" && ya.holdUntil && ya.holdUntil > ahora))) {
+      return res.status(409).json({ error: "El turno ya está tomado" });
+    }
+
+    // creo HOLD en archivo como compat
+    rr[claveReserva] = {
+      ...(ya || {}),
+      status: "hold",
+      holdUntil: ahora + HOLD_MIN * 60 * 1000,
+      nombre: nombre || "",
+      telefono: telefono || "",
+      complejoId,
+      monto,
+      cancha: cancha || "",
+      fecha: fecha || "",
+      hora: hora || ""
+    };
+    escribirJSON(pathReservas, rr);
   }
 
-  // creo HOLD en archivo como compat
-  rr[claveReserva] = {
-    ...(ya || {}),
-    status: "hold",
-    holdUntil: ahora + HOLD_MIN * 60 * 1000,
-    nombre: nombre || "",
-    telefono: telefono || "",
-    complejoId,
-    monto,
-    cancha: cancha || "",
-    fecha: fecha || "",
-    hora: hora || ""
-  };
-  escribirJSON(pathReservas, rr);
-}
   // Mantengo también el HOLD en archivo como compat (por si mirás admin viejo)
   const reservas = leerJSON(pathReservas);
   const holdUntil = Date.now() + HOLD_MIN * 60 * 1000;
   reservas[clave] = {
+    ...(reservas[clave] || {}),
     status: "hold",
     holdUntil,
     nombre: nombre || "",
@@ -613,11 +614,10 @@ try {
     try {
       tokenActual = await tokenPara(complejoId);
     } catch (e) {
-      // Liberar HOLD si el complejo no tiene OAuth (en archivo y DB)
+      // Liberar HOLD si el complejo no tiene OAuth (en archivo)
       const rr = leerJSON(pathReservas);
       delete rr[clave];
       escribirJSON(pathReservas, rr);
-      // liberar en DB: (dejamos que expire solo o podríamos marcar cancelado)
 
       if (e.code === "NO_OAUTH") {
         return res.status(409).json({
@@ -660,7 +660,7 @@ try {
       }
     }
 
-    // 3) Preferencia OK
+    // 3) Preferencia OK (persisto compat local y la BD se confirma en el webhook)
     reservas[clave] = {
       ...(reservas[clave] || {}),
       status: "hold",
@@ -717,7 +717,7 @@ async function _legacyCrearPreferencia({ complejoId, clave, titulo, monto, holdU
 
   try {
     const tokenActual = tokenPara(complejoId);
-    const mp = new MercadoPagoConfig({ access_token: tokenActual });
+    const mp = new MercadoPagoConfig({ accessToken: tokenActual });
     const preference = new Preference(mp);
     result = await preference.create({ body: prefBody });
 
@@ -731,7 +731,7 @@ async function _legacyCrearPreferencia({ complejoId, clave, titulo, monto, holdU
     if (isInvalidTokenError(err1)) {
       try {
         const nuevoToken = await refreshOAuthToken(complejoId);
-        const mp2 = new MercadoPagoConfig({ access_token: nuevoToken });
+        const mp2 = new MercadoPagoConfig({ accessToken: nuevoToken });
         const preference2 = new Preference(mp2);
         const r2 = await preference2.create({ body: prefBody });
 
@@ -900,10 +900,10 @@ app.get("/mp/conectar", (req, res) => {
   res.redirect(u.toString());
 });
 
-app.get("/mp/estado", (req, res) => {
-  const { complejoId } = req.query;
+// Alias adicional por si escribís /mp/estado/elbosque
+app.get("/mp/estado/:complejoId?", (req, res) => {
+  const complejoId = req.params.complejoId || req.query.complejoId;
   if (!complejoId) return res.status(400).json({ ok:false, error:"Falta complejoId" });
-
   const creds = leerCredsMP_OAUTH();
   const conectado = Boolean(creds[complejoId]?.oauth?.access_token);
   res.json({ ok:true, conectado });
