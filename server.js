@@ -916,7 +916,6 @@ app.get("/mp/callback", async (req, res) => {
   }
 
   try {
-    // Intercambio del authorization_code por tokens OAuth
     const r = await fetch("https://api.mercadopago.com/oauth/token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -935,7 +934,6 @@ app.get("/mp/callback", async (req, res) => {
       return res.status(400).send("❌ No se pudo completar la conexión con Mercado Pago.");
     }
 
-    // Guardamos tokens en credenciales_mp.json
     const all = leerCredsMP_OAUTH();
     all[complejoId] = all[complejoId] || {};
     all[complejoId].oauth = {
@@ -950,13 +948,32 @@ app.get("/mp/callback", async (req, res) => {
     };
     escribirCredsMP_OAUTH(all);
 
-    res.send("✅ Mercado Pago conectado. Ya podés cerrar esta pestaña.");
+    const volver = `${process.env.PUBLIC_URL}/onboarding.html?complejo=${encodeURIComponent(complejoId)}&mp=ok`;
+    res.status(200).send(`<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mercado Pago conectado</title>
+<style>
+  body{font-family:Segoe UI,Arial,sans-serif;background:#f6f7fb;margin:0;display:grid;place-items:center;height:100vh}
+  .box{background:#fff;padding:24px 20px;border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.07);text-align:center;max-width:420px}
+  h1{margin:0 0 8px;color:#0b8457}
+  p{margin:6px 0 18px}
+  a,button{display:inline-block;background:#0b8457;color:#fff;text-decoration:none;border:none;border-radius:10px;padding:10px 16px}
+  small{display:block;margin-top:10px;color:#777}
+</style></head>
+<body>
+  <div class="box">
+    <h1>✅ Mercado Pago conectado</h1>
+    <p>Ya podés volver al onboarding.</p>
+    <a href="${volver}">Volver al onboarding</a>
+    <small>Te redirigimos en 2 segundos…</small>
+  </div>
+  <script>setTimeout(function(){ location.href = ${JSON.stringify(volver)}; }, 2000);</script>
+</body></html>`);
   } catch (e) {
     console.error("Callback OAuth MP error:", e?.message || e);
     res.status(500).send("❌ Error inesperado conectando Mercado Pago.");
   }
 });
-
 // =======================
 // Arranque del server
 // =======================
