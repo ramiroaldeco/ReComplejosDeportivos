@@ -520,26 +520,48 @@ app.post("/crear-preferencia", async (req, res) => {
     return res.status(400).json({ error: "Faltan cancha/fecha/hora (o clave)" });
   }
 
-  // ===== NUEVO: HOLD en la BD (anti doble-reserva por concurrencia) =====
-  try {
-    const okHold = await dao.crearHold({
-      complex_id: complejoId,
-      cancha,
-      fechaISO: fecha,
-      hora,
-      nombre,
-      telefono,
-      monto,
-      holdMinutes: HOLD_MIN
-    });
-    if (!okHold) {
-      return res.status(409).json({ error: "El turno ya está tomado" });
-    }
-  } catch (e) {
-    console.error("DB crear hold:", e);
-    return res.status(500).json({ error: "No se pudo bloquear el turno" });
+  // ===== HOLD (DB con fallback a archivo) =====
+const claveReserva = clave;
+try {
+  const okHold = await dao.crearHold({
+    complex_id: complejoId,
+    cancha,
+    fechaISO: fecha,
+    hora,
+    nombre,
+    telefono,
+    monto,
+    holdMinutes: HOLD_MIN
+  });
+  if (!okHold) {
+    return res.status(409).json({ error: "El turno ya está tomado" });
+  }
+} catch (e) {
+  console.error("DB crear hold falló, uso archivo:", e?.message || e);
+  const rr = leerJSON(pathReservas);
+  const ya = rr[claveReserva];
+  const ahora = Date.now();
+
+  // si ya estaba tomado (approved) o con hold activo → 409
+  if (ya && (ya.status === "approved" || (ya.status === "hold" && ya.holdUntil && ya.holdUntil > ahora))) {
+    return res.status(409).json({ error: "El turno ya está tomado" });
   }
 
+  // creo HOLD en archivo como compat
+  rr[claveReserva] = {
+    ...(ya || {}),
+    status: "hold",
+    holdUntil: ahora + HOLD_MIN * 60 * 1000,
+    nombre: nombre || "",
+    telefono: telefono || "",
+    complejoId,
+    monto,
+    cancha: cancha || "",
+    fecha: fecha || "",
+    hora: hora || ""
+  };
+  escribirJSON(pathReservas, rr);
+}
   // Mantengo también el HOLD en archivo como compat (por si mirás admin viejo)
   const reservas = leerJSON(pathReservas);
   const holdUntil = Date.now() + HOLD_MIN * 60 * 1000;
