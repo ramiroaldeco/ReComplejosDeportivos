@@ -1,6 +1,27 @@
-// dao.js
+// dao.js — versión alineada con server.js y front (claves/slug unificado)
 const pool = require('./db');
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcrypt'); // por si luego migrás login a hash
+
+/* ===================== Helpers ===================== */
+
+function slugCancha(nombre = "") {
+  return String(nombre)
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[^a-z0-9]/g, "");
+}
+function hhmm(x) {
+  // pg suele devolver 'HH:MM:SS' como string
+  return String(x || "").slice(0, 5);
+}
+function ymd(d) {
+  // fecha PG → 'YYYY-MM-DD'
+  try {
+    return (d instanceof Date ? d : new Date(d)).toISOString().slice(0, 10);
+  } catch {
+    return String(d || "").slice(0, 10);
+  }
+}
 
 /* ===================== COMPLEJOS ===================== */
 
@@ -33,22 +54,22 @@ async function listarComplejos() {
       nombre: c.name,
       ciudad: c.city,
       maps: c.maps_iframe,
-      servicios: c.servicios || [],
-      imagenes: c.imagenes || [],
+      servicios: Array.isArray(c.servicios) ? c.servicios : (c.servicios ? c.servicios : []),
+      imagenes: Array.isArray(c.imagenes)  ? c.imagenes  : (c.imagenes  ? c.imagenes  : []),
       canchas: [],
       horarios: {}
     };
   }
 
-  // map día 0..6 -> nombre
+  // map día 0..6 -> nombre (0=Domingo en la DB)
   const dowNames = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
 
   for (const s of sched) {
     const dia = dowNames[s.day_of_week] || "Lunes";
     if (out[s.complex_id]) {
       out[s.complex_id].horarios[dia] = {
-        desde: String(s.desde).slice(0,5),
-        hasta: String(s.hasta).slice(0,5)
+        desde: hhmm(s.desde) || "18:00",
+        hasta: hhmm(s.hasta) || "23:00"
       };
     }
   }
@@ -159,12 +180,13 @@ async function loginDueno(complejoId, password) {
     `select clave_legacy from complexes where id=$1`, [complejoId]
   );
   if (!rows.length) return { ok:false };
+  // si más adelante guardás hash: return { ok: await bcrypt.compare(password, rows[0].clave_legacy_hash) }
   return { ok: (rows[0].clave_legacy || '') === (password || '') };
 }
 
 /* ===================== RESERVAS (compat objeto) ===================== */
 
-// reservations → objeto clave legacy
+// reservations → objeto clave legacy (usamos SLUG de cancha para que coincida con el front)
 async function listarReservasObjCompat() {
   const q = `
     select r.*, f.name as cancha
@@ -174,9 +196,9 @@ async function listarReservasObjCompat() {
   const { rows } = await pool.query(q);
   const out = {};
   for (const r of rows) {
-    const fechaISO = r.fecha.toISOString().slice(0,10);
-    const hh = r.hora.toString().slice(0,5);
-    const key = `${r.complex_id}-${r.cancha}-${fechaISO}-${hh}`;
+    const fechaISO = ymd(r.fecha);
+    const hh = hhmm(r.hora);
+    const key = `${r.complex_id}-${slugCancha(r.cancha)}-${fechaISO}-${hh}`;
     const item = {
       status: r.status,
       nombre: r.nombre || "",
@@ -186,7 +208,10 @@ async function listarReservasObjCompat() {
       payment_id: r.payment_id || undefined
     };
     if (r.status === 'blocked') item.bloqueado = true;
-    if (r.hold_until) item.holdUntil = r.hold_until.getTime();
+    if (r.hold_until) {
+      const t = (r.hold_until instanceof Date) ? r.hold_until.getTime() : Number(new Date(r.hold_until).getTime());
+      if (!Number.isNaN(t)) item.holdUntil = t;
+    }
     out[key] = item;
   }
   return out;
@@ -211,11 +236,11 @@ async function guardarReservasObjCompat(obj) {
     `;
 
     for (const key of Object.keys(obj || {})) {
-      // key: slug-Cancha-YYYY-MM-DD-HH:mm
+      // key: complexId-slugCancha-YYYY-MM-DD-HH:mm  (o variantes compatibles)
       const parts = key.split('-');
       if (parts.length < 4) continue;
       const complex_id = parts[0];
-      const cancha = parts[1];
+      const canchaKey = parts[1];
 
       const tail = parts.slice(2).join('-');
       const m = tail.match(/(\d{4}-\d{2}-\d{2})-(\d{2}:\d{2})$/);
@@ -225,7 +250,9 @@ async function guardarReservasObjCompat(obj) {
 
       const r = obj[key];
 
-      const f = await client.query(fieldQ, [complex_id, cancha]);
+      // buscar por nombre original o por "slug"
+      // (si la key es slug, este where ya contempla la comparación sin espacios)
+      const f = await client.query(fieldQ, [complex_id, canchaKey]);
       if (!f.rowCount) continue;
       const field_id = f.rows[0].id;
 
