@@ -351,7 +351,11 @@ app.post("/crear-preferencia", async (req, res) => {
     return res.status(400).json({ error: "Faltan cancha/fecha/hora (o clave)" });
   }
 
-  // HOLD en BD (anti doble-reserva)
+  // --- HOLD en BD (solo si llegaron cancha/fecha/hora) ---
+if (cancha && fecha && hora) {
+  const v = validarTurno({ complejoId, canchaNombre: cancha, fecha, hora });
+  if (!v.ok) return res.status(400).json({ error: v.error });
+
   try {
     const okHold = await dao.crearHold({
       complex_id: complejoId,
@@ -368,9 +372,13 @@ app.post("/crear-preferencia", async (req, res) => {
     }
   } catch (e) {
     console.error("DB crear hold:", e);
-    return res.status(500).json({ error: "No se pudo bloquear el turno" });
+    // No rompas el flujo: seguimos sin HOLD en BD (legacy),
+    // igual se hará HOLD en archivo más abajo.
   }
-
+} else if (!claveLegacy) {
+  // Si no hay datos del turno ni clave legacy, no podemos seguir.
+  return res.status(400).json({ error: "Faltan cancha/fecha/hora (o clave)" });
+}
   // HOLD también en archivo (compat panel viejo)
   const reservas = leerJSON(pathReservas);
   const holdUntil = Date.now() + HOLD_MIN * 60 * 1000;
