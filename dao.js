@@ -340,4 +340,39 @@ module.exports = {
 
   crearHold,
   actualizarReservaTrasPago
+    upsertMpOAuth,
+  getMpOAuth,
 };
+// ==== MP OAuth en DB ====
+async function upsertMpOAuth({ complex_id, access_token, refresh_token, scope, token_type, live_mode, expires_in }) {
+  await pool.query(`
+    create table if not exists mp_oauth (
+      complex_id  text primary key,
+      access_token text,
+      refresh_token text,
+      scope text,
+      token_type text,
+      live_mode boolean,
+      expires_in integer,
+      updated_at timestamptz default now()
+    )
+  `);
+  await pool.query(`
+    insert into mp_oauth (complex_id, access_token, refresh_token, scope, token_type, live_mode, expires_in, updated_at)
+    values ($1,$2,$3,$4,$5,$6,$7, now())
+    on conflict (complex_id) do update set
+      access_token = excluded.access_token,
+      refresh_token = excluded.refresh_token,
+      scope = excluded.scope,
+      token_type = excluded.token_type,
+      live_mode = excluded.live_mode,
+      expires_in = excluded.expires_in,
+      updated_at = now()
+  `, [complex_id, access_token, refresh_token, scope || null, token_type || null, !!live_mode, expires_in || null]);
+  return { ok: true };
+}
+
+async function getMpOAuth(complex_id) {
+  const { rows } = await pool.query(`select access_token, refresh_token from mp_oauth where complex_id = $1`, [complex_id]);
+  return rows[0] || null;
+}
