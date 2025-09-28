@@ -47,6 +47,35 @@ function escribirCredsMP_OAUTH(obj) {
   fs.writeFileSync(pathCreds, JSON.stringify(obj, null, 2));
 }
 
+/**
+ * Nuevo: obtener el access_token de MP priorizando la DB (tabla mp_oauth)
+ * y con fallback a credenciales_mp.json por compatibilidad.
+ * -> Usalo con:  const token = await tokenParaAsync(complejoId)
+ */
+async function tokenParaAsync(complejoId) {
+  // 1) DB primero
+  try {
+    if (dao?.getMpOAuth) {
+      const t = await dao.getMpOAuth(complejoId); // { access_token, refresh_token }
+      if (t?.access_token) return t.access_token;
+    }
+  } catch (e) {
+    console.warn("tokenParaAsync:getMpOAuth", e?.message || e);
+  }
+
+  // 2) Fallback a archivo
+  const cred = leerCredsMP_OAUTH();
+  const tok = cred?.[complejoId]?.oauth?.access_token;
+  if (tok) return tok;
+
+  const err = new Error(`El complejo ${complejoId} no tiene Mercado Pago conectado (OAuth).`);
+  err.code = "NO_OAUTH";
+  throw err;
+}
+
+/**
+ * Legacy (solo archivo). La dejo por compat, pero preferí usar tokenParaAsync().
+ */
 function tokenPara(complejoId) {
   const cred = leerCredsMP_OAUTH();
   const c = cred[complejoId] || {};
@@ -65,7 +94,6 @@ function isInvalidTokenError(err) {
   const m3 = (err && err.cause && String(err.cause).toLowerCase()) || "";
   return m1.includes("unauthorized") || m2.includes("invalid_token") || m3.includes("invalid_token");
 }
-
 // Refresca token con refresh_token guardado
 async function refreshOAuthToken(complejoId) {
   const creds = leerCredsMP_OAUTH();
@@ -454,7 +482,9 @@ if (cancha && fecha && hora) {
     // 1) token actual del dueño
     let tokenActual;
     try {
-      tokenActual = tokenPara(complejoId);
+      // ahora
+tokenActual = await tokenParaAsync(complejoId);
+
     } catch (e) {
       // liberar hold en archivo
       const rr = leerJSON(pathReservas);
