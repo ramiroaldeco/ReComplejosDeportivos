@@ -268,6 +268,36 @@ app.get("/reservas", async (_req, res) => {
     res.json(leerJSON(pathReservas)); // fallback
   }
 });
+// === LOGIN DUEÑO ===
+app.post("/login", async (req, res) => {
+  const id   = String(req.body?.complejo || "").trim();   // slug del complejo
+  const pass = String(req.body?.password || "").trim();   // clave del dueño
+
+  if (!id || !pass) return res.status(400).json({ error: "Faltan datos" });
+
+  let ok = false;
+
+  // 1) Chequeo en la DB
+  try {
+    const r = await dao.loginDueno(id, pass); // debe devolver { ok: true/false }
+    ok = !!r?.ok;
+  } catch (e) {
+    console.error("DB /login:", e);
+  }
+
+  // 2) Fallback a archivo (por si la DB no tenía la clave guardada aún)
+  if (!ok) {
+    try {
+      const datos = leerJSON(pathDatos);
+      const claveArchivo = String(datos?.[id]?.clave || "").trim();
+      if (claveArchivo && claveArchivo === pass) ok = true;
+    } catch {}
+  }
+
+  if (!ok) return res.status(401).json({ error: "Contraseña incorrecta" });
+  res.json({ ok: true });
+});
+
 
 // Guardar reservas masivo (panel dueño)
 app.post("/guardarReservas", async (req, res) => {
