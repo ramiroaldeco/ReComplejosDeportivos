@@ -1,4 +1,4 @@
-// server.js (Reservas Para Complejos) — versión corregida
+// server.js (Reservas Para Complejos)
 require("dotenv").config();
 
 const express = require("express");
@@ -48,12 +48,11 @@ function escribirCredsMP_OAUTH(obj) {
 }
 
 /**
- * Nuevo: obtener el access_token de MP priorizando la DB (tabla mp_oauth)
- * y con fallback a credenciales_mp.json por compatibilidad.
- * -> Usalo con:  const token = await tokenParaAsync(complejoId)
+ * Access token priorizando DB (tabla mp_oauth) con fallback a archivo.
+ * Usar:  const token = await tokenParaAsync(complejoId)
  */
 async function tokenParaAsync(complejoId) {
-  // 1) DB primero
+  // 1) DB primero (si existen helpers en dao)
   try {
     if (dao?.getMpOAuth) {
       const t = await dao.getMpOAuth(complejoId); // { access_token, refresh_token }
@@ -73,9 +72,7 @@ async function tokenParaAsync(complejoId) {
   throw err;
 }
 
-/**
- * Legacy (solo archivo). La dejo por compat, pero preferí usar tokenParaAsync().
- */
+/** Legacy (solo archivo). Dejar por compat, pero evitar su uso. */
 function tokenPara(complejoId) {
   const cred = leerCredsMP_OAUTH();
   const c = cred[complejoId] || {};
@@ -94,7 +91,8 @@ function isInvalidTokenError(err) {
   const m3 = (err && err.cause && String(err.cause).toLowerCase()) || "";
   return m1.includes("unauthorized") || m2.includes("invalid_token") || m3.includes("invalid_token");
 }
-// Refresca token con refresh_token guardado
+
+// Refresca token con refresh_token guardado (guarda en archivo + DB si está disponible)
 async function refreshOAuthToken(complejoId) {
   const creds = leerCredsMP_OAUTH();
   const c = creds[complejoId] || {};
@@ -116,7 +114,7 @@ async function refreshOAuthToken(complejoId) {
   const j = await r.json();
   if (!r.ok || !j.access_token) throw new Error("No se pudo refrescar el token OAuth de Mercado Pago");
 
-  // persistir
+  // persistir en archivo
   creds[complejoId] = creds[complejoId] || {};
   creds[complejoId].oauth = {
     ...(creds[complejoId].oauth || {}),
@@ -126,10 +124,26 @@ async function refreshOAuthToken(complejoId) {
     updated_at: Date.now()
   };
   escribirCredsMP_OAUTH(creds);
+
+  // persistir en DB (si existe helper)
+  try {
+    if (dao?.upsertMpOAuth) {
+      await dao.upsertMpOAuth({
+        complex_id: complejoId,
+        access_token: j.access_token,
+        refresh_token: j.refresh_token || refresh_token,
+        scope: j.scope,
+        token_type: j.token_type,
+        live_mode: j.live_mode,
+        expires_in: j.expires_in
+      });
+    }
+  } catch (e) { console.warn("refreshOAuthToken:upsertMpOAuth", e?.message || e); }
+
   return j.access_token;
 }
 
-// Variante usada en crear-preferencia
+// Variante usada en crear-preferencia (deja persistido en archivo + DB si está)
 async function refreshTokenMP(complejoId) {
   const allCreds = leerCredsMP_OAUTH();
   const creds = allCreds?.[complejoId]?.oauth || null;
@@ -169,6 +183,22 @@ async function refreshTokenMP(complejoId) {
     ...newCreds
   };
   escribirCredsMP_OAUTH(allCreds);
+
+  // DB (si está disponible)
+  try {
+    if (dao?.upsertMpOAuth) {
+      await dao.upsertMpOAuth({
+        complex_id: complejoId,
+        access_token: newCreds.access_token,
+        refresh_token: newCreds.refresh_token,
+        scope: newCreds.scope,
+        token_type: newCreds.token_type,
+        live_mode: newCreds.live_mode,
+        expires_in: newCreds.expires_in
+      });
+    }
+  } catch (e) { console.warn("refreshTokenMP:upsertMpOAuth", e?.message || e); }
+
   return newCreds.access_token;
 }
 
@@ -296,6 +326,7 @@ app.get("/reservas", async (_req, res) => {
     res.json(leerJSON(pathReservas)); // fallback
   }
 });
+
 // === LOGIN DUEÑO ===
 app.post("/login", async (req, res) => {
   const id   = String(req.body?.complejo || "").trim();   // slug del complejo
@@ -325,7 +356,6 @@ app.post("/login", async (req, res) => {
   if (!ok) return res.status(401).json({ error: "Contraseña incorrecta" });
   res.json({ ok: true });
 });
-
 
 // Guardar reservas masivo (panel dueño)
 app.post("/guardarReservas", async (req, res) => {
@@ -410,33 +440,32 @@ app.post("/crear-preferencia", async (req, res) => {
   }
 
   // --- HOLD en BD (solo si llegaron cancha/fecha/hora) ---
-if (cancha && fecha && hora) {
-  const v = validarTurno({ complejoId, canchaNombre: cancha, fecha, hora });
-  if (!v.ok) return res.status(400).json({ error: v.error });
+  if (cancha && fecha && hora) {
+    const v = validarTurno({ complejoId, canchaNombre: cancha, fecha, hora });
+    if (!v.ok) return res.status(400).json({ error: v.error });
 
-  try {
-    const okHold = await dao.crearHold({
-      complex_id: complejoId,
-      cancha,
-      fechaISO: fecha,
-      hora,
-      nombre,
-      telefono,
-      monto,
-      holdMinutes: HOLD_MIN
-    });
-    if (!okHold) {
-      return res.status(409).json({ error: "El turno ya está tomado" });
+    try {
+      const okHold = await dao.crearHold({
+        complex_id: complejoId,
+        cancha,
+        fechaISO: fecha,
+        hora,
+        nombre,
+        telefono,
+        monto,
+        holdMinutes: HOLD_MIN
+      });
+      if (!okHold) {
+        return res.status(409).json({ error: "El turno ya está tomado" });
+      }
+    } catch (e) {
+      console.error("DB crear hold:", e);
+      // seguimos: también se hace HOLD en archivo más abajo
     }
-  } catch (e) {
-    console.error("DB crear hold:", e);
-    // No rompas el flujo: seguimos sin HOLD en BD (legacy),
-    // igual se hará HOLD en archivo más abajo.
+  } else if (!claveLegacy) {
+    return res.status(400).json({ error: "Faltan cancha/fecha/hora (o clave)" });
   }
-} else if (!claveLegacy) {
-  // Si no hay datos del turno ni clave legacy, no podemos seguir.
-  return res.status(400).json({ error: "Faltan cancha/fecha/hora (o clave)" });
-}
+
   // HOLD también en archivo (compat panel viejo)
   const reservas = leerJSON(pathReservas);
   const holdUntil = Date.now() + HOLD_MIN * 60 * 1000;
@@ -482,9 +511,7 @@ if (cancha && fecha && hora) {
     // 1) token actual del dueño
     let tokenActual;
     try {
-      // ahora
-tokenActual = await tokenParaAsync(complejoId);
-
+      tokenActual = await tokenParaAsync(complejoId);
     } catch (e) {
       // liberar hold en archivo
       const rr = leerJSON(pathReservas);
@@ -531,12 +558,25 @@ tokenActual = await tokenParaAsync(complejoId);
     }
 
     // 3) Preferencia OK → indexamos prefId -> clave/complejo y devolvemos
-    const prefId   = result?.id || result?.body?.id || result?.response?.id;
+    const prefId    = result?.id || result?.body?.id || result?.response?.id;
     const initPoint = result?.init_point || result?.body?.init_point || result?.response?.init_point || "";
 
     const idx = leerJSON(pathIdx);
     idx[prefId] = { clave, complejoId };
     escribirJSON(pathIdx, idx);
+
+    // intentar enlazar en BD (si existe helper)
+    try {
+      if (dao?.setPreferenceIdEnHold && cancha && fecha && hora && prefId) {
+        await dao.setPreferenceIdEnHold({
+          complex_id: complejoId,
+          cancha,
+          fechaISO: fecha,
+          hora,
+          preference_id: prefId
+        });
+      }
+    } catch (e) { console.warn("setPreferenceIdEnHold", e?.message || e); }
 
     const r2 = leerJSON(pathReservas);
     if (r2[clave]) {
@@ -612,14 +652,16 @@ app.post("/webhook-mp", async (req, res) => {
     if (!clave) return;
 
     // actualizar BD (si está disponible)
+    let updated = false;
     try {
-      await dao.actualizarReservaTrasPago({
+      const u = await dao.actualizarReservaTrasPago({
         preference_id: prefId,
         payment_id: pago?.id,
         status,
         nombre: pago?.metadata?.nombre || null,
         telefono: pago?.metadata?.telefono || null
       });
+      updated = !!u;
     } catch (e) {
       console.error("DB actualizar tras pago:", e);
     }
@@ -681,12 +723,23 @@ app.get("/mp/conectar", (req, res) => {
   res.redirect(u.toString());
 });
 
-app.get("/mp/estado", (req, res) => {
+app.get("/mp/estado", async (req, res) => {
   const { complejoId } = req.query;
   if (!complejoId) return res.status(400).json({ ok:false, error:"Falta complejoId" });
 
-  const creds = leerCredsMP_OAUTH();
-  const conectado = Boolean(creds[complejoId]?.oauth?.access_token);
+  // DB primero
+  let conectado = false;
+  try {
+    if (dao?.getMpOAuth) {
+      const t = await dao.getMpOAuth(complejoId);
+      conectado = !!t?.access_token;
+    }
+  } catch {}
+  // Fallback a archivo
+  if (!conectado) {
+    const creds = leerCredsMP_OAUTH();
+    conectado = !!creds?.[complejoId]?.oauth?.access_token;
+  }
   res.json({ ok:true, conectado });
 });
 
@@ -722,7 +775,22 @@ app.get("/mp/callback", async (req, res) => {
       return res.redirect(u.toString());
     }
 
-    // Persisto credenciales OAuth del DUEÑO de ese complejo
+    // Persisto credenciales OAuth del DUEÑO (DB si está la función)
+    try {
+      if (dao?.upsertMpOAuth) {
+        await dao.upsertMpOAuth({
+          complex_id: complejoId,
+          access_token: data.access_token,
+          refresh_token: data.refresh_token,
+          scope: data.scope,
+          token_type: data.token_type,
+          live_mode: data.live_mode,
+          expires_in: data.expires_in
+        });
+      }
+    } catch (e) { console.warn("callback:upsertMpOAuth", e?.message || e); }
+
+    // Archivo (backup)
     const all = leerCredsMP_OAUTH();
     all[complejoId] = all[complejoId] || {};
     all[complejoId].oauth = {
@@ -751,6 +819,7 @@ app.get("/mp/callback", async (req, res) => {
     return res.redirect(u.toString());
   }
 });
+
 // =======================
 // Notificaciones opcionales (WhatsApp y email)
 // =======================
