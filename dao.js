@@ -176,14 +176,18 @@ async function guardarDatosComplejos(merged) {
 
 /* ===================== LOGIN DUEÑO (compat) ===================== */
 async function loginDueno(complejoId, password) {
-  const { rows } = await pool.query(
-    `select clave_legacy from complexes where id=$1`, [complejoId]
-  );
-  if (!rows.length) return { ok:false };
-  // si más adelante guardás hash: return { ok: await bcrypt.compare(password, rows[0].clave_legacy_hash) }
-  return { ok: (rows[0].clave_legacy || '') === (password || '') };
-}
+  const id = String(complejoId || "").trim();
+  const pass = String(password || "").trim();
 
+  const { rows } = await pool.query(
+    `select coalesce(clave_legacy,'') as clave_legacy from complexes where id=$1`,
+    [id]
+  );
+  if (!rows.length) return { ok: false };
+
+  const guardada = String(rows[0].clave_legacy || "").trim();
+  return { ok: guardada !== "" && guardada === pass };
+}
 /* ===================== RESERVAS (compat objeto) ===================== */
 
 // reservations → objeto clave legacy (usamos SLUG de cancha para que coincida con el front)
