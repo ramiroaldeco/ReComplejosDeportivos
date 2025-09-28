@@ -633,10 +633,14 @@ app.get("/mp/estado", (req, res) => {
 app.get("/mp/callback", async (req, res) => {
   const { code, state: complejoId } = req.query;
   if (!code || !complejoId) {
-    return res.status(400).send("❌ Faltan parámetros en el callback");
+    // si vienen mal los params, vuelvo al onboarding con error
+    const u = new URL(`${process.env.PUBLIC_URL}/onboarding.html`);
+    u.searchParams.set("mp", "error");
+    return res.redirect(u.toString());
   }
+
   try {
-    // Intercambio authorization_code por tokens
+    // Intercambio authorization_code → tokens
     const r = await fetch("https://api.mercadopago.com/oauth/token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -649,11 +653,16 @@ app.get("/mp/callback", async (req, res) => {
       })
     });
     const data = await r.json();
-    if (!r.ok || !data.access_token) {
-      console.error("OAuth error:", data);
-      return res.status(400).send("❌ No se pudo completar la conexión con Mercado Pago.");
+
+    if (!r.ok || !data?.access_token) {
+      // redirijo con error si falló el intercambio
+      const u = new URL(`${process.env.PUBLIC_URL}/onboarding.html`);
+      u.searchParams.set("complejo", complejoId);
+      u.searchParams.set("mp", "error");
+      return res.redirect(u.toString());
     }
 
+    // Persisto credenciales OAuth del DUEÑO de ese complejo
     const all = leerCredsMP_OAUTH();
     all[complejoId] = all[complejoId] || {};
     all[complejoId].oauth = {
@@ -668,13 +677,20 @@ app.get("/mp/callback", async (req, res) => {
     };
     escribirCredsMP_OAUTH(all);
 
-    res.send("✅ Mercado Pago conectado. Ya podés cerrar esta pestaña.");
+    // Redirijo al onboarding con confirmación
+    const ok = new URL(`${process.env.PUBLIC_URL}/onboarding.html`);
+    ok.searchParams.set("complejo", complejoId);
+    ok.searchParams.set("mp", "ok");
+    return res.redirect(ok.toString());
+
   } catch (e) {
     console.error("Callback OAuth MP error:", e?.message || e);
-    res.status(500).send("❌ Error inesperado conectando Mercado Pago.");
+    const u = new URL(`${process.env.PUBLIC_URL}/onboarding.html`);
+    u.searchParams.set("complejo", complejoId);
+    u.searchParams.set("mp", "error");
+    return res.redirect(u.toString());
   }
 });
-
 // =======================
 // Notificaciones opcionales (WhatsApp y email)
 // =======================
