@@ -1,13 +1,13 @@
-// server.js (Reservas Para Complejos)
 require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
-const fetch = require("node-fetch"); // v2 en package.json
+const fetch = require("node-fetch"); // v2
 const { MercadoPagoConfig, Preference } = require("mercadopago");
 
+// 👉 Importá el DAO así, SIN destructurar:
 const dao = require("./dao");
 
 // --- App & middlewares
