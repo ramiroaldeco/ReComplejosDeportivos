@@ -7,8 +7,9 @@ const path = require("path");
 const fetch = require("node-fetch"); // v2
 const { MercadoPagoConfig, Preference } = require("mercadopago");
 
-// 👉 Importá el DAO así, SIN destructurar:
+// Importá TODO el DAO como un objeto:
 const dao = require("./dao");
+
 
 // --- App & middlewares
 const app = express();
@@ -54,12 +55,12 @@ function escribirCredsMP_OAUTH(obj) {
 async function tokenParaAsync(complejoId) {
   // 1) DB primero (si existen helpers en dao)
   try {
-    if (dao?.getMpOAuth) {
-      const t = await dao.getMpOAuth(complejoId); // { access_token, refresh_token }
+    if (dao?.) {
+      const t = await dao.(complejoId); // { access_token, refresh_token }
       if (t?.access_token) return t.access_token;
     }
   } catch (e) {
-    console.warn("tokenParaAsync:getMpOAuth", e?.message || e);
+    console.warn("tokenParaAsync:", e?.message || e);
   }
 
   // 2) Fallback a archivo
@@ -127,8 +128,8 @@ async function refreshOAuthToken(complejoId) {
 
   // persistir en DB (si existe helper)
   try {
-    if (dao?.upsertMpOAuth) {
-      await dao.upsertMpOAuth({
+    if (dao?.) {
+      await dao.({
         complex_id: complejoId,
         access_token: j.access_token,
         refresh_token: j.refresh_token || refresh_token,
@@ -138,7 +139,7 @@ async function refreshOAuthToken(complejoId) {
         expires_in: j.expires_in
       });
     }
-  } catch (e) { console.warn("refreshOAuthToken:upsertMpOAuth", e?.message || e); }
+  } catch (e) { console.warn("refreshOAuthToken:", e?.message || e); }
 
   return j.access_token;
 }
@@ -186,8 +187,8 @@ async function refreshTokenMP(complejoId) {
 
   // DB (si está disponible)
   try {
-    if (dao?.upsertMpOAuth) {
-      await dao.upsertMpOAuth({
+    if (dao?.) {
+      await dao.({
         complex_id: complejoId,
         access_token: newCreds.access_token,
         refresh_token: newCreds.refresh_token,
@@ -197,7 +198,7 @@ async function refreshTokenMP(complejoId) {
         expires_in: newCreds.expires_in
       });
     }
-  } catch (e) { console.warn("refreshTokenMP:upsertMpOAuth", e?.message || e); }
+  } catch (e) { console.warn("refreshTokenMP:", e?.message || e); }
 
   return newCreds.access_token;
 }
@@ -730,8 +731,8 @@ app.get("/mp/estado", async (req, res) => {
   // DB primero
   let conectado = false;
   try {
-    if (dao?.getMpOAuth) {
-      const t = await dao.getMpOAuth(complejoId);
+    if (dao?.) {
+      const t = await dao.(complejoId);
       conectado = !!t?.access_token;
     }
   } catch {}
@@ -777,8 +778,8 @@ app.get("/mp/callback", async (req, res) => {
 
     // Persisto credenciales OAuth del DUEÑO (DB si está la función)
     try {
-      if (dao?.upsertMpOAuth) {
-        await dao.upsertMpOAuth({
+      if (dao?.) {
+        await dao.({
           complex_id: complejoId,
           access_token: data.access_token,
           refresh_token: data.refresh_token,
@@ -788,7 +789,7 @@ app.get("/mp/callback", async (req, res) => {
           expires_in: data.expires_in
         });
       }
-    } catch (e) { console.warn("callback:upsertMpOAuth", e?.message || e); }
+    } catch (e) { console.warn("callback:", e?.message || e); }
 
     // Archivo (backup)
     const all = leerCredsMP_OAUTH();
