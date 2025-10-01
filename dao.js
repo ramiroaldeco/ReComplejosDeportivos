@@ -339,10 +339,13 @@ module.exports = {
   guardarReservasObjCompat,
 
   crearHold,
-  actualizarReservaTrasPago
-    upsertMpOAuth,
+  actualizarReservaTrasPago,
+
+  // OAuth en DB
+  upsertMpOAuth,
   getMpOAuth,
 };
+
 // ==== MP OAuth en DB ====
 async function upsertMpOAuth({ complex_id, access_token, refresh_token, scope, token_type, live_mode, expires_in }) {
   await pool.query(`
