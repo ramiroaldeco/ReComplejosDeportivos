@@ -884,7 +884,7 @@ async function notificarAprobado({ clave, complejoId, nombre, telefono, monto })
 }
 
 // endpoint de prueba (lo podés borrar después)
-app.post("/__test-email", async (req, res) => {
+app.get("/__test-email", async (req, res) => {
   try {
     await enviarEmail("elbosque", "Prueba Recomplejos", "<p>Hola Diego 👋, esto es una prueba de correo.</p>");
     res.json({ ok: true, msg: "Email de prueba enviado." });
@@ -899,3 +899,4 @@ app.post("/__test-email", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server escuchando en http://0.0.0.0:${PORT}`);
 });
+
