@@ -1,5 +1,6 @@
 require("dotenv").config();
 
+const nodemailer = require("nodemailer");
 const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
@@ -7,15 +8,33 @@ const path = require("path");
 const fetch = require("node-fetch"); // v2
 const { MercadoPagoConfig, Preference } = require("mercadopago");
 
+// >>> JWT ADD (arriba, junto a los require)
+const jwt = require('jsonwebtoken');
+const JWT_SECRET = process.env.JWT_SECRET || 'cambialo_en_.env';
+
+
 // 👉 Importá el DAO así, SIN destructurar:
 const dao = require("./dao");
-
 
 // --- App & middlewares
 const app = express();
 const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
+
+// >>> JWT ADD – middleware de auth (no pisa nada)
+function auth(req, res, next) {
+  const h = req.headers.authorization || '';
+  const m = h.match(/^Bearer (.+)$/);
+  if (!m) return res.status(401).json({ ok:false, error:'no_token' });
+  try {
+    const payload = jwt.verify(m[1], JWT_SECRET);
+    req.user = payload; // { sub:'dueno', complejo:'...' }
+    next();
+  } catch (e) {
+    return res.status(401).json({ ok:false, error:'bad_token' });
+  }
+}
 
 // --- Paths de respaldos JSON (compat)
 const pathDatos    = path.join(__dirname, "datos_complejos.json");
@@ -29,6 +48,12 @@ function leerJSON(p) {
 }
 function escribirJSON(p, obj) {
   fs.writeFileSync(p, JSON.stringify(obj, null, 2));
+}
+function parseClaveServidor(k){
+  // formato nuevo: complejo-cancha-YYYY-MM-DD-HH:MM
+  const m = k.match(/^(.+?)-(.+?)-(\d{4}-\d{2}-\d{2})-(\d{2}:\d{2})$/);
+  if(!m) return null;
+  return { complejo: m[1], cancha: m[2], fechaISO: m[3], hora: m[4] };
 }
 
 // asegurar archivos de backup
@@ -821,83 +846,53 @@ app.get("/mp/callback", async (req, res) => {
   }
 });
 
-// =======================
-// Notificaciones opcionales (WhatsApp y email)
-// =======================
-async function enviarWhatsApp(complejoId, texto) {
-  const token = process.env.WHATSAPP_TOKEN;
-  const phoneId = process.env.WHATSAPP_PHONE_ID;
-  if (!token || !phoneId) return;
-
-  const datos = _cacheComplejosCompat;
-  const para = (datos?.[complejoId]?.whatsappDueño) || process.env.ADMIN_WHATSAPP_TO;
-  if (!para) return;
-
-  const url = `https://graph.facebook.com/v20.0/${phoneId}/messages`;
-  const body = {
-    messaging_product: "whatsapp",
-    to: String(para),
-    type: "text",
-    text: { body: texto }
-  };
-  try {
-    await fetch(url, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${token}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(body)
-    });
-  } catch (e) {
-    console.error("WhatsApp noti error:", e?.message || e);
-  }
-}
-
+// --- EMAIL (Gmail via nodemailer) ---
 async function enviarEmail(complejoId, asunto, html) {
-  const key = process.env.RESEND_API_KEY;
-  const from = process.env.RESEND_FROM;
-  if (!key || !from) return;
-
-  const datos = _cacheComplejosCompat;
-  const para = (datos?.[complejoId]?.emailDueño) || process.env.ADMIN_EMAIL;
-  if (!para) return;
-
   try {
-    await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${key}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ from, to: [para], subject: asunto, html })
+    const datos = Object.keys(_cacheComplejosCompat||{}).length ? _cacheComplejosCompat : leerJSON(pathDatos);
+    const para = (datos?.[complejoId]?.emailDueño) || process.env.ADMIN_EMAIL;
+    if (!para) return;
+
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: { user: process.env.GMAIL_USER, pass: process.env.GOOGLE_APP_PASSWORD },
     });
+
+    await transporter.sendMail({ from: process.env.GMAIL_USER, to: para, subject: asunto, html });
+    console.log("[EMAIL] enviado a", para);
   } catch (e) {
-    console.error("Email noti error:", e?.message || e);
+    console.error("[EMAIL] error:", e?.message || e);
   }
 }
 
 async function notificarAprobado({ clave, complejoId, nombre, telefono, monto }) {
-  const texto = `✅ Nueva reserva confirmada
-Complejo: ${complejoId}
-Turno: ${clave}
-Cliente: ${nombre} (${telefono})
-Seña: $${monto}`;
+  try {
+    const info = parseClaveServidor(clave) || {};
+    const conf = (_cacheComplejosCompat?.[complejoId]) || {};
+    const notif = conf.notif || {};
+    const ownerEmail = conf.emailDueño || "";
 
-  const html = `
-    <h2>✅ Nueva reserva confirmada</h2>
-    <p><strong>Complejo:</strong> ${complejoId}</p>
-    <p><strong>Turno:</strong> ${clave}</p>
-    <p><strong>Cliente:</strong> ${nombre} (${telefono})</p>
-    <p><strong>Seña:</strong> $${monto}</p>
-  `;
+    const texto = `✅ Nueva reserva: ${info.cancha || "s/d"} – ${info.hora || "s/d"} – Seña $${Number(monto || 0)}`;
+    const html  = `<p>${texto}</p>`;
 
-  await Promise.all([
-    enviarWhatsApp(complejoId, texto),
-    enviarEmail(complejoId, "Nueva reserva confirmada", html)
-  ]);
+    const tareas = [];
+    if (notif.email && ownerEmail) tareas.push(enviarEmail(complejoId, "Nueva reserva", html));
+    if (tareas.length) await Promise.all(tareas);
+  } catch (e) {
+    console.error("notificarAprobado error:", e.message || e);
+  }
 }
 
+// endpoint de prueba (lo podés borrar después)
+app.post("/__test-email", async (req, res) => {
+  try {
+    await enviarEmail("elbosque", "Prueba Recomplejos", "<p>Hola Diego 👋, esto es una prueba de correo.</p>");
+    res.json({ ok: true, msg: "Email de prueba enviado." });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
 // =======================
 // Arranque
 // =======================
