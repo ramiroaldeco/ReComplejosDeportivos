@@ -1,6 +1,5 @@
 require("dotenv").config();
 
-const nodemailer = require("nodemailer");
 const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
@@ -394,7 +393,30 @@ app.post("/guardarReservas", async (req, res) => {
     res.status(500).json({ error: "DB error al guardar" });
   }
 });
+// Notificar reserva manual (desde micomplejo)
+app.post("/notificar-manual", async (req, res) => {
+  try {
+    const { clave, complejoId, nombre, telefono, monto } = req.body || {};
+    if (!clave || !complejoId) return res.status(400).json({ ok:false, error:"Faltan datos" });
 
+    const info = parseClaveServidor(clave) || {};
+    const { subject, html } = plantillaMailReserva({
+      complejoId,
+      cancha: info.cancha,
+      fecha: info.fechaISO,
+      hora: info.hora,
+      nombre,
+      telefono,
+      monto
+    });
+
+    await enviarEmail(complejoId, subject, html);
+    return res.json({ ok:true });
+  } catch (e) {
+    console.error("/notificar-manual", e?.message || e);
+    return res.status(500).json({ ok:false, error:"server_error" });
+  }
+});
 // ¿Está libre este turno?
 app.get("/disponible", async (req,res)=>{
   const { complejoId, cancha, fecha, hora } = req.query || {};
@@ -846,7 +868,79 @@ app.get("/mp/callback", async (req, res) => {
   }
 });
 
-// --- EMAIL (Gmail via nodemailer) ---
+// ====== Email (Gmail) ======
+const nodemailer = require("nodemailer");
+
+// lee contacto y switches priorizando DB; fallback al cache o JSON
+async function getOwnerConfig(complejoId) {
+  try {
+    if (dao?.leerContactoComplejo) {
+      const r = await dao.leerContactoComplejo(complejoId);
+      if (r) {
+        return {
+          owner_email: r.owner_email || "",
+          owner_phone: r.owner_phone || "",
+          notif_email: !!r.notif_email,
+          notif_whats: !!r.notif_whats,
+        };
+      }
+    }
+  } catch (e) {
+    console.warn("getOwnerConfig DB", e?.message || e);
+  }
+  // fallback al cache/archivo (compat)
+  const datos = Object.keys(_cacheComplejosCompat||{}).length ? _cacheComplejosCompat : leerJSON(pathDatos);
+  const conf = datos?.[complejoId] || {};
+  const notif = conf.notif || {};
+  return {
+    owner_email: conf.emailDueño || "",
+    owner_phone: conf.whatsappDueño || "",
+    notif_email: !!notif.email,
+    notif_whats: !!notif.whats
+  };
+}
+
+function plantillaMailReserva({ complejoId, cancha, fecha, hora, nombre, telefono, monto }) {
+  const telFmt = telefono ? (String(telefono).startsWith('+') ? telefono : `+${String(telefono).replace(/\D/g,'')}`) : 's/d';
+  const montoFmt = (monto!=null && monto!=="") ? `ARS $${Number(monto).toLocaleString('es-AR')}` : '—';
+  const titulo = `NUEVA RESERVA – ${cancha || ''} ${hora || ''}`.trim();
+
+  const html = `
+    <div style="font-family:system-ui,Segoe UI,Arial,sans-serif;line-height:1.45">
+      <h2 style="margin:0 0 10px">NUEVA RESERVA</h2>
+      <p><b>Complejo:</b> ${complejoId}</p>
+      <p><b>Cancha:</b> ${cancha || 's/d'}</p>
+      <p><b>Fecha:</b> ${fecha || 's/d'} <b>Hora:</b> ${hora || 's/d'}</p>
+      <p><b>Cliente:</b> ${nombre || '—'}</p>
+      <p><b>Teléfono:</b> ${telFmt}</p>
+      <p><b>Seña:</b> ${montoFmt}</p>
+      <hr style="border:none;height:1px;background:#ddd;margin:12px 0" />
+      <small style="color:#666">Recomplejos</small>
+    </div>`;
+  return { subject: titulo, html };
+}
+
+async function enviarEmail(complejoId, subject, html) {
+  try {
+    const { owner_email, notif_email } = await getOwnerConfig(complejoId);
+    if (!notif_email || !owner_email) return; // no activado o sin email
+
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: { user: process.env.GMAIL_USER, pass: process.env.GOOGLE_APP_PASSWORD },
+    });
+
+    await transporter.sendMail({ from: process.env.GMAIL_USER, to: owner_email, subject, html });
+    console.log("[EMAIL] enviado a", owner_email);
+  } catch (e) {
+    console.error("[EMAIL] error:", e?.message || e);
+  }
+}
+
+// =======================
+// Notificaciones (solo Email con Gmail)
+// =======================
+
 async function enviarEmail(complejoId, asunto, html) {
   try {
     const datos = Object.keys(_cacheComplejosCompat||{}).length ? _cacheComplejosCompat : leerJSON(pathDatos);
@@ -868,22 +962,23 @@ async function enviarEmail(complejoId, asunto, html) {
 async function notificarAprobado({ clave, complejoId, nombre, telefono, monto }) {
   try {
     const info = parseClaveServidor(clave) || {};
-    const conf = (_cacheComplejosCompat?.[complejoId]) || {};
-    const notif = conf.notif || {};
-    const ownerEmail = conf.emailDueño || "";
-
-    const texto = `✅ Nueva reserva: ${info.cancha || "s/d"} – ${info.hora || "s/d"} – Seña $${Number(monto || 0)}`;
-    const html  = `<p>${texto}</p>`;
-
-    const tareas = [];
-    if (notif.email && ownerEmail) tareas.push(enviarEmail(complejoId, "Nueva reserva", html));
-    if (tareas.length) await Promise.all(tareas);
+    const { subject, html } = plantillaMailReserva({
+      complejoId,
+      cancha: info.cancha,
+      fecha: info.fechaISO,
+      hora: info.hora,
+      nombre,
+      telefono,
+      monto
+    });
+    await enviarEmail(complejoId, subject, html);
   } catch (e) {
-    console.error("notificarAprobado error:", e.message || e);
+    console.error("notificarAprobado error:", e?.message || e);
   }
 }
 
-// endpoint de prueba (lo podés borrar después)
+
+// Endpoint de prueba (GET para abrirlo en el navegador)
 app.get("/__test-email", async (req, res) => {
   try {
     await enviarEmail("elbosque", "Prueba Recomplejos", "<p>Hola Diego 👋, esto es una prueba de correo.</p>");
@@ -893,10 +988,65 @@ app.get("/__test-email", async (req, res) => {
     res.status(500).json({ ok: false, error: e.message });
   }
 });
+// Arriba ya debés tener: const dao = require('./dao');
+
+app.get('/complejos/:id/contacto', async (req, res) => {
+  try {
+    const out = await dao.leerContactoComplejo(req.params.id);
+    res.json({ ok: true, data: out });
+  } catch (e) {
+    console.error('GET contacto', e);
+    res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
+app.post('/complejos/:id/contacto', async (req, res) => {
+  try {
+    const { owner_phone, owner_email, notif_whats, notif_email } = req.body || {};
+    const out = await dao.guardarContactoComplejo(req.params.id, { owner_phone, owner_email, notif_whats, notif_email });
+    res.json({ ok: true, data: out });
+  } catch (e) {
+    console.error('POST contacto', e);
+    res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
+app.post('/complejos/:id/notificaciones', async (req, res) => {
+  try {
+    const { notif_whats, notif_email } = req.body || {};
+    const out = await dao.guardarNotificaciones(req.params.id, { notif_whats, notif_email });
+    res.json({ ok: true, data: out });
+  } catch (e) {
+    console.error('POST notificaciones', e);
+    res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
+// === MP: guardar credenciales pos-onboarding u OAuth callback ===
+app.post('/complejos/:id/mp/credenciales', async (req, res) => {
+  try {
+    const saved = await dao.guardarCredencialesMP(req.params.id, req.body || {});
+    res.json({ ok: true, data: saved });
+  } catch (e) {
+    console.error('POST mp/credenciales', e);
+    res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
+// === MP: leer credenciales (para crear preferencia, etc.) ===
+app.get('/complejos/:id/mp/credenciales', async (req, res) => {
+  try {
+    const creds = await dao.leerCredencialesMP(req.params.id);
+    res.json({ ok: true, data: creds });
+  } catch (e) {
+    console.error('GET mp/credenciales', e);
+    res.status(500).json({ ok: false, error: 'server_error' });
+  }
+});
+
 // =======================
 // Arranque
 // =======================
 app.listen(PORT, () => {
   console.log(`Server escuchando en http://0.0.0.0:${PORT}`);
 });
-
