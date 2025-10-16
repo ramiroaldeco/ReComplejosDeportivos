@@ -305,11 +305,12 @@ app.get("/datos_complejos", async (_req, res) => {
   try {
     res.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
     const d = await dao.listarComplejos();   // BD
-    _cacheComplejosCompat = d;               // refresca cache
-    res.json(d);
+    _cacheComplejosCompat = d;
+    res.json({ ok:true, via:"db", count:Object.keys(d||{}).length, data:d });
   } catch (e) {
     console.error("DB /datos_complejos", e);
-    res.json(leerJSON(pathDatos));           // fallback archivo
+    const f = leerJSON(pathDatos);
+    res.json({ ok:true, via:"file", count:Object.keys(f||{}).length, data:f });
   }
 });
 
