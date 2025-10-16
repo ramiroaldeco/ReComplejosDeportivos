@@ -331,21 +331,28 @@ async function actualizarReservaTrasPago({ preference_id, payment_id, status, no
 }
 
 module.exports = {
+  // === Complejos y datos base ===
   listarComplejos,
   guardarDatosComplejos,
   loginDueno,
 
+  // === Reservas ===
   listarReservasObjCompat,
   guardarReservasObjCompat,
-
   crearHold,
   actualizarReservaTrasPago,
 
-  // OAuth en DB
+  // === MP OAuth ===
   upsertMpOAuth,
   getMpOAuth,
-};
 
+  // === Contacto y notificaciones ===
+  leerContactoComplejo,
+  guardarContactoComplejo,
+  guardarNotificaciones,
+  guardarCredencialesMP,
+  leerCredencialesMP
+};
 // ==== MP OAuth en DB ====
 async function upsertMpOAuth({ complex_id, access_token, refresh_token, scope, token_type, live_mode, expires_in }) {
   await pool.query(`
