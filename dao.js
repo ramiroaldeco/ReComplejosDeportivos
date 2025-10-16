@@ -379,3 +379,88 @@ async function getMpOAuth(complex_id) {
   const { rows } = await pool.query(`select access_token, refresh_token from mp_oauth where complex_id = $1`, [complex_id]);
   return rows[0] || null;
 }
+// ===================== DUEÑO / CONTACTO =====================
+
+// Lee contacto + switches de un complejo
+async function leerContactoComplejo(complexId) {
+  const { rows } = await pool.query(
+    `SELECT owner_phone, owner_email, notif_whats, notif_email
+     FROM complexes WHERE id = $1`,
+    [complexId]
+  );
+  return rows[0] || null;
+}
+
+// Guarda contacto (tel + email) y, si vienen, switches
+async function guardarContactoComplejo(complexId, { owner_phone, owner_email, notif_whats, notif_email }) {
+  const { rows } = await pool.query(
+    `UPDATE complexes
+       SET owner_phone = COALESCE($2, owner_phone),
+           owner_email = COALESCE($3, owner_email),
+           notif_whats = COALESCE($4, notif_whats),
+           notif_email = COALESCE($5, notif_email)
+     WHERE id = $1
+     RETURNING id, owner_phone, owner_email, notif_whats, notif_email`,
+    [complexId, owner_phone ?? null, owner_email ?? null, notif_whats ?? null, notif_email ?? null]
+  );
+  return rows[0];
+}
+
+// Cambia SOLO switches de notificación
+async function guardarNotificaciones(complexId, { notif_whats, notif_email }) {
+  const { rows } = await pool.query(
+    `UPDATE complexes
+       SET notif_whats = COALESCE($2, notif_whats),
+           notif_email = COALESCE($3, notif_email)
+     WHERE id = $1
+     RETURNING id, notif_whats, notif_email`,
+    [complexId, notif_whats ?? null, notif_email ?? null]
+  );
+  return rows[0];
+}
+
+// ===================== MERCADO PAGO =====================
+
+// Guarda credenciales MP por complejo (post OAuth o manual)
+async function guardarCredencialesMP(complexId, creds) {
+  const {
+    mp_user_id,
+    mp_public_key,
+    mp_access_token,
+    mp_refresh_token,
+    mp_token_expiry // ISO string opcional
+  } = creds;
+
+  const { rows } = await pool.query(
+    `UPDATE complexes
+       SET mp_user_id       = COALESCE($2, mp_user_id),
+           mp_public_key    = COALESCE($3, mp_public_key),
+           mp_access_token  = COALESCE($4, mp_access_token),
+           mp_refresh_token = COALESCE($5, mp_refresh_token),
+           mp_token_expiry  = COALESCE($6, mp_token_expiry)
+     WHERE id = $1
+     RETURNING id, mp_user_id, mp_public_key, mp_access_token IS NOT NULL AS has_token, mp_token_expiry`,
+    [complexId, mp_user_id ?? null, mp_public_key ?? null, mp_access_token ?? null, mp_refresh_token ?? null, mp_token_expiry ?? null]
+  );
+  return rows[0];
+}
+
+// Lee credenciales MP por complejo (para crear preferencias, etc.)
+async function leerCredencialesMP(complexId) {
+  const { rows } = await pool.query(
+    `SELECT mp_user_id, mp_public_key, mp_access_token, mp_refresh_token, mp_token_expiry
+     FROM complexes WHERE id = $1`,
+    [complexId]
+  );
+  return rows[0] || null;
+}
+
+module.exports = {
+  // ...lo que ya exportabas
+  leerContactoComplejo,
+  guardarContactoComplejo,
+  guardarNotificaciones,
+  guardarCredencialesMP,
+  leerCredencialesMP
+};
+
