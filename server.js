@@ -304,15 +304,15 @@ let _cacheComplejosCompat = {};
 app.get("/datos_complejos", async (_req, res) => {
   try {
     res.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
-    const d = await dao.listarComplejos();   // BD
+    const d = await dao.listarComplejos();   // intenta traer desde DB
     _cacheComplejosCompat = d;
-    res.json({ ok:true, via:"db", count:Object.keys(d||{}).length, data:d });
+    res.json(d); // ✅ directo desde DB
   } catch (e) {
     console.error("DB /datos_complejos", e);
-    const f = leerJSON(pathDatos);
-    res.json({ ok:true, via:"file", count:Object.keys(f||{}).length, data:f });
+    res.json(leerJSON(pathDatos)); // fallback al archivo solo si falla
   }
 });
+
 
 // Guardar datos mergeados (onboarding)
 app.post("/guardarDatos", async (req, res) => {
