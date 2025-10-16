@@ -1,563 +1,1271 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="es">
 <head>
-  <meta charset="UTF-8" />
-  <title>Mi Complejo</title>
-  <style>
-    body {
-      font-family: 'Segoe UI', sans-serif;
-      margin: 0;
-      background-color: #f8f8f8;
-      color: #333;
-    }
-    header {
-      background-color: #00aa55;
-      color: white;
-      padding: 20px;
-      text-align: center;
-    }
-    .contenedor {
-      max-width: 1000px;
-      margin: auto;
-      padding: 20px;
-      background: white;
-      border-radius: 10px;
-      margin-top: 20px;
-    }
-    h2 { color: #00aa55; }
-    input, select, button, textarea {
-      padding: 10px;
-      margin: 10px 5px;
-      border-radius: 5px;
-      border: 1px solid #ccc;
-    }
-    button {
-      background-color: #00aa55;
-      color: white;
-      cursor: pointer;
-      border: none;
-    }
-    .panel { margin-top: 30px; }
+<meta charset="utf-8">
+<title>Mi Complejo – Panel del Propietario</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 
-    .imagenes-preview {
-      display: flex;
-      gap: 10px;
-      overflow-x: auto;
-      margin-top: 10px;
-    }
-    .imagenes-preview div { display: flex; flex-direction: column; align-items: center; }
-    .imagenes-preview img { height: 150px; border-radius: 10px; }
+<!-- XLSX para exportar Excel prolijo -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
-    .servicios {
-      display: flex; flex-wrap: wrap; gap: 15px; margin-top: 10px;
-    }
-    .servicios label {
-      display: flex; align-items: center; gap: 5px;
-      background: #f0f0f0; padding: 8px 12px; border-radius: 20px;
-    }
+<style>
+  :root{
+    --bg:#0b0b0b;
+    --panel:#111;
+    --brand:#00b050;      /* verde principal */
+    --brand-2:#009245;    /* verde oscuro */
+    --text:#e9f1ec;
+    --muted:#a9b7b0;
+    --border:#1d1d1d;
+    --soft:#162016;
+    --danger:#d7263d;
+    --warn:#ffbf00;
 
-    table { width: 100%; border-collapse: collapse; margin-top: 20px; background: white; }
-    th, td { border: 1px solid #ccc; padding: 8px; text-align: center; }
-    th { background-color: #00aa55; color: white; }
-    .reservado { background-color: #f44336; color: white; }
-    .disponible { background-color: #4CAF50; color: white; }
-    .deshabilitado { background-color: #aaa; color: white; }
-    .bloque { background-color: #ffd700; color: black; }
-
-    /* ===== Tabla de turnos (admin) ===== */
-    .tabla-scroll{
-      max-height: 520px;     /* alto visible; aparece scroll si hay muchas filas */
-      overflow: auto;        /* scroll X e Y */
-      border: 1px solid #e7ecef;
-      border-radius: 12px;
-    }
-    .turnos{
-      width: 100%;
-      border-collapse: separate;
-      border-spacing: 0;
-      min-width: 960px;
-      font-size: 14px;
-    }
-    .turnos th, .turnos td{
-      padding: 10px 12px;
-      border-bottom: 1px solid #eef2f6;
-    }
-    .turnos thead th{
-      position: sticky; top: 0; background: #0b8457; color: #fff; z-index: 2;
-    }
-    .turnos th:first-child, .turnos td:first-child{
-      position: sticky; left: 0; background: #fff; z-index: 3; font-weight: 600;
-    }
-    .turnos tbody tr:nth-child(even) td{ background: #fbfcfd; }
-    .turnos .deshabilitado{ background:#f1f3f6; color:#7a7f87; text-align:center; }
-    .turnos .reservado{ background:#ffe3e3; color:#b42318; font-weight:600; text-align:center; }
-    .turnos .disponible{ background:#e8f7ee; color:#136f3a; text-align:center; cursor:pointer; }
-    .turnos .disponible:hover{ filter: brightness(0.97); }
-    .turnos .btn-mini{
-      display:inline-flex; align-items:center; justify-content:center;
-      width:32px; height:32px; border-radius:10px; border:0;
-      background:#0b8457; color:#fff; cursor:pointer;
-    }
-    .turnos .btn-mini.secondary{ background:#e53935; }
-    .turnos .btn-mini:disabled{ opacity:.5; cursor:not-allowed; }
-  </style>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-</head>
-<body>
-  <header><h1>Panel del Propietario</h1></header>
-
-  <div class="contenedor" id="loginPanel">
-    <h2>Ingresar a tu complejo</h2>
-    <select id="complejo">
-      <option value="">-- Elegí tu complejo --</option>
-    </select>
-    <input type="password" id="clave" placeholder="Contraseña" />
-    <button onclick="entrarAdmin()">Entrar</button>
-  </div>
-
-  <div id="panel" class="contenedor" style="display:none;">
-    <h2 id="tituloComplejo"></h2>
-    <button onclick="cerrarSesion()">Cerrar sesión</button>
-
-    <!-- Datos del Complejo -->
-    <div class="panel">
-      <h3>Datos del Complejo</h3>
-      <input type="text" id="nombreComplejo" placeholder="Nombre del complejo" />
-      <input type="text" id="ciudadComplejo" placeholder="Ciudad" />
-      <textarea id="iframeMapa" rows="4" style="width:100%;" placeholder="Pegar código iframe del mapa aquí"></textarea>
-      <button onclick="guardarDatosGenerales()">Guardar datos del complejo</button>
-    </div>
-
-    <!-- Horarios del Complejo -->
-    <div class="panel">
-      <h3>Horarios del Complejo</h3>
-      <table>
-        <thead><tr><th>Día</th><th>Desde</th><th>Hasta</th></tr></thead>
-        <tbody id="tablaHorarios"></tbody>
-      </table>
-      <button onclick="guardarHorarios()">Guardar horarios</button>
-    </div>
-
-    <!-- Fotos del Complejo -->
-    <div class="panel">
-      <h3>Fotos del Complejo</h3>
-      <input type="file" id="imagenes" multiple accept="image/*" />
-      <button onclick="alert('Subí tus imágenes a https://postimg.cc y pegá los enlaces')">Guardar Imágenes</button>
-      <div class="imagenes-preview" id="preview"></div>
-    </div>
-
-    <!-- Servicios -->
-    <div class="panel">
-      <h3>Servicios ofrecidos</h3>
-      <div class="servicios" id="listaServicios">
-        <label><input type="checkbox" value="Duchas" /> Duchas</label>
-        <label><input type="checkbox" value="Vestuarios" /> Vestuarios</label>
-        <label><input type="checkbox" value="Quincho" /> Quincho</label>
-        <label><input type="checkbox" value="Parrilla" /> Parrilla</label>
-        <label><input type="checkbox" value="Wifi" /> Wifi</label>
-        <label><input type="checkbox" value="Bar" /> Bar</label>
-        <label><input type="checkbox" value="Buffet" /> Buffet</label>
-        <label><input type="checkbox" value="Baños" /> Baños</label>
-        <label><input type="checkbox" value="Estacionamiento" /> Estacionamiento</label>
-      </div>
-      <button onclick="guardarServicios()">Guardar servicios</button>
-    </div>
-
-    <!-- Canchas -->
-    <div class="panel">
-      <h3>Canchas del Complejo</h3>
-      <div id="listaCanchas"></div>
-      <button onclick="agregarCancha()">+ Agregar Cancha</button>
-      <button onclick="guardarCanchas()">Guardar Canchas</button>
-    </div>
-
-    <!-- Turnos -->
-    <div class="panel">
-      <h3>Turnos del Complejo</h3>
-      <div id="tablasTurnosCanchas"></div>
-    </div>
-  </div>
-
-  <script>
-  // ===== Helpers horarios (incluye trasnoche) =====
-  function canonDia(d){ return (d||"").normalize("NFD").replace(/[\u0300-\u036f]/g,""); }
-  function getHorario(horarios, nombreDia){ return horarios[nombreDia] || horarios[canonDia(nombreDia)] || {}; }
-  function entre(hora, desde, hasta){
-    if(!desde || !hasta) return false;
-    return (desde <= hasta) ? (hora >= desde && hora <= hasta) : (hora >= desde || hora <= hasta);
+    --chip:#e6fff0;       /* tabs estilo chip */
+    --chip-border:#bdf5d3;
   }
 
-  // ===== Estado global =====
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif}
+  a{color:var(--brand);text-decoration:none}
+  header{
+    position:sticky; top:0; z-index:50;
+    display:flex; align-items:center; justify-content:space-between; gap:10px;
+    padding:14px 16px; border-bottom:1px solid var(--border);
+    background:linear-gradient(180deg,#0b0b0b,#0c0c0c);
+  }
+  header h1{margin:0;font-size:18px;font-weight:800;letter-spacing:.2px}
+  .wrap{max-width:1100px;margin:18px auto;padding:0 12px}
+  .card{
+    background:linear-gradient(180deg,#0f0f0f,#0e130f);
+    border:1px solid var(--border);
+    border-radius:14px;
+    padding:14px;
+    box-shadow:0 6px 24px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.02);
+    margin-bottom:14px;
+  }
+  .card h2{margin:0 0 10px 0;font-size:18px}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .grid{display:grid;gap:10px}
+  .g2{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .g3{grid-template-columns:repeat(3,minmax(0,1fr))}
+  @media (max-width:900px){ .g2,.g3{grid-template-columns:1fr} }
+
+  label.chip{display:block;font-size:12px;color:var(--muted);margin:4px 0 6px 2px}
+  input,select,textarea{
+    width:100%;padding:12px 12px;border-radius:10px;background:#0d0d0d;color:#e9f1ec;
+    border:1px solid #1b1b1b; outline:none; font-size:16px;
+  }
+  input::placeholder{color:#6c756f}
+  textarea{min-height:90px;resize:vertical}
+
+  .btn{
+    display:inline-flex;align-items:center;justify-content:center;gap:8px;
+    border-radius:10px;padding:12px 14px;border:1px solid #113a1f;
+    background:linear-gradient(180deg, var(--brand), var(--brand-2));
+    color:#fff;font-weight:800;cursor:pointer;min-height:44px;
+    box-shadow:0 2px 0 #062d16, inset 0 0 0 1px rgba(255,255,255,.05);
+  }
+  .btn:disabled{opacity:.6;cursor:not-allowed}
+  .btn-ghost{
+    background:#0e0e0e;border:1px solid #1a1a1a;color:#cfe7db;min-height:44px;font-weight:800
+  }
+  .btn-danger{
+    background:linear-gradient(180deg,#f55,#b00);border:1px solid #5a0d13
+  }
+  .btn-warn{
+    background:linear-gradient(180deg,#ffd34a,#eeb20b);border:1px solid #6b5400;color:#1a1300
+  }
+  .muted{color:var(--muted)}
+  .sep{height:1px;background:var(--border);margin:10px 0}
+
+  /* Tabs como chips */
+  .tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+  .tab{
+    background:#eef2f4;color:#0d1422;border:1px solid #dbe3e7;
+    padding:8px 14px;border-radius:999px;font-weight:900;cursor:pointer
+  }
+  .tab.active{
+    background:var(--chip); border-color:var(--chip-border); color:#0d1422;
+    box-shadow:inset 0 0 0 2px #d8ffe8;
+  }
+
+  /* Tabla turnos (vista del día) */
+  .tabla-dia{width:100%;border-collapse:separate;border-spacing:0 8px}
+  .tabla-dia th{font-size:12px;color:#b9c9c1;text-align:left;padding:8px 6px}
+  .tabla-dia td{
+    padding:8px;border:1px solid #162016;background:#0e130f;border-radius:10px
+  }
+  .slot{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+  .estado{font-weight:900}
+  .ok   {background:linear-gradient(180deg,#0f1b12,#0d1a10);border-color:#17381f}
+  .off  {background:#0b0b0b;border-color:#191919;color:#808a83}
+  .res  {background:linear-gradient(180deg,#152014,#0f1a11);border-color:#214125}
+  .res .estado{color:#83f2a6}
+  .bloq {background:linear-gradient(180deg,#1e1a0a,#151207);border-color:#4a3f0f}
+  .bloq .estado{color:#ffde6e}
+  .pasado{opacity:.55;filter:saturate(.5)}
+
+  .tag{
+    display:inline-flex;align-items:center;gap:6px;
+    background:#0b0b0b;border:1px solid #1a2b1f;color:#bfe3cd;
+    border-radius:999px;padding:6px 10px;font-size:12px
+  }
+  .kpi{display:flex;gap:10px;flex-wrap:wrap}
+  .kpi .chip{font-size:11px}
+  .kpi .box{background:#0e0e0e;border:1px solid #1a1a1a;border-radius:12px;padding:10px 12px;min-width:120px}
+  .kpi .num{font-size:18px;font-weight:800}
+
+  /* Scroll contenedor turnos */
+  .scroll{max-height:60vh;overflow:auto;padding-right:2px}
+  .sticky-tools{position:sticky;top:0;background:linear-gradient(180deg,#0f0f0f,#0e130f);z-index:5;padding-bottom:10px}
+
+  /* Loader */
+  #loadingOverlay{
+    position:fixed; inset:0; z-index:9999; background:rgba(0,0,0,.55);
+    display:none; align-items:center; justify-content:center; text-align:center;
+  }
+  #loadingOverlay.show{display:flex}
+  .spinner{width:56px;height:56px;border-radius:50%;
+    border:4px solid rgba(255,255,255,.25); border-top-color:var(--brand);
+    animation:spin 1s linear infinite; margin:0 auto 12px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  #loadingOverlay .msg{color:#fff;font-weight:800}
+
+  /* (ANALÍTICAS) barra mini de ocupación */
+  .ibar{height:8px;background:#0b0b0b;border:1px solid #1a2b1f;border-radius:999px;overflow:hidden}
+  .ibar>i{display:block;height:100%;background:linear-gradient(180deg, var(--brand), var(--brand-2));}
+  
+  /* ===== Notificaciones (micomplejo.html) ===== */
+.noti-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 10px;
+}
+
+.noti-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: #111;
+  padding: 10px 14px;
+  border-radius: 10px;
+}
+
+.noti-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.noti-icon {
+  width: 28px;
+  height: 28px;
+}
+
+.noti-title {
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.noti-desc {
+  font-size: 13px;
+  color: #aaa;
+}
+
+.noti-preview {
+  margin-top: 15px;
+  font-size: 13px;
+  background: #1b1b1b;
+  padding: 8px 10px;
+  border-radius: 6px;
+  color: #ccc;
+}
+
+/* Switch estilo iOS */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 46px;
+  height: 24px;
+}
+.switch input {display:none;}
+.slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-color: #666;
+  transition: .4s;
+  border-radius: 34px;
+}
+.slider:before {
+  position: absolute;
+  content: "";
+  height: 18px; width: 18px;
+  left: 3px; bottom: 3px;
+  background-color: white;
+  transition: .4s;
+  border-radius: 50%;
+}
+input:checked + .slider {
+  background-color: #0b8457; /* verde */
+}
+input:checked + .slider:before {
+  transform: translateX(22px);
+}
+.notificaciones {
+  margin-top: 20px;
+  background: rgba(255,255,255,0.05);
+  padding: 12px 16px;
+  border-radius: 10px;
+}
+.switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  cursor: pointer;
+  color: #eaf6f0;
+}
+.switch input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+}
+#guardarNotif {
+  background: var(--brand);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+  margin-top: 6px;
+}
+
+</style>
+</head>
+
+<body>
+  <!-- Loader -->
+  <div id="loadingOverlay">
+    <div>
+      <div class="spinner"></div>
+      <div class="msg" id="loadingMsg">Cargando…</div>
+    </div>
+  </div>
+
+  <header>
+    <h1>Panel del Propietario</h1>
+    <a class="btn-ghost" href="https://ramiroaldeco.github.io/recomplejos-frontend/">← Inicio</a>
+  </header>
+
+  <div class="wrap">
+
+    <!-- (LOGIN) — acceso del propietario, único visible hasta validar -->
+    <div class="card" id="loginPanel">
+      <h2>Ingresar a su complejo</h2>
+      <div class="grid g2">
+        <div>
+          <label class="chip">Complejo</label>
+          <select id="complejo">
+            <option value="">— Seleccione su complejo —</option>
+          </select>
+        </div>
+        <div>
+          <label class="chip">Contraseña</label>
+          <input type="password" id="clave" placeholder="Contraseña">
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn" onclick="entrarAdmin()">Entrar</button>
+      </div>
+    </div>
+
+    <!-- (APP) — contenido protegido; aparece recién después del login -->
+    <div id="app" style="display:none">
+      <!-- (TABS/NAVEGACIÓN) chips: Tablero / Caja / Config / Analíticas / Ayuda -->
+      <div class="tabs" id="tabs">
+        <div class="tab active" data-tab="tablero" onclick="activar('tablero')">Tablero</div>
+        <div class="tab" data-tab="caja" onclick="activar('caja')">Caja</div>
+        <div class="tab" data-tab="config" onclick="activar('config')">Config</div>
+        <div class="tab" data-tab="analiticas" onclick="activar('analiticas')">Analíticas</div>
+        <div class="tab" data-tab="ayuda" onclick="activar('ayuda')">Ayuda</div>
+      </div>
+
+      <!-- (TABLERO) — operación diaria, turnos del día -->
+      <section id="tablero" class="card" style="display:block">
+        <h2>Operación diaria</h2>
+
+        <div class="grid g2">
+          <div>
+            <label class="chip">Fecha</label>
+            <input type="date" id="fechaDia">
+          </div>
+          <div>
+            <label class="chip">Cancha</label>
+            <select id="selCancha"></select>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:10px">
+          <span class="tag" id="chipPrecio">—</span>
+          <span class="tag" id="chipSenia">—</span>
+        </div>
+
+        <div class="sep"></div>
+        <div class="kpi" id="resumenDia"></div>
+
+        <div class="scroll" style="margin-top:10px">
+          <table class="tabla-dia" id="tablaDia">
+            <thead>
+              <tr>
+                <th style="width:110px">Hora</th>
+                <th>Estado y acciones</th>
+              </tr>
+            </thead>
+            <tbody id="tbodyDia"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- (CAJA) — exportación a Excel -->
+      <section id="caja" class="card" style="display:none">
+        <h2>Caja y exportación</h2>
+        <div class="grid g2">
+          <div>
+            <label class="chip">Desde</label>
+            <input type="date" id="cajaDesde">
+          </div>
+          <div>
+            <label class="chip">Hasta</label>
+            <input type="date" id="cajaHasta">
+          </div>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn" onclick="exportarExcel()">Exportar Excel (.xlsx)</button>
+          <span class="muted">Columnas: Fecha, Cancha, Hora, Estado, Cliente, Teléfono, <b>Precio p/p</b>, <b>Jugadores</b>, <b>Total estimado</b>, <b>Seña cobrada</b>.</span>
+        </div>
+      </section>
+
+      <!-- (CONFIG) — canchas y horarios -->
+      <section id="config" class="card" style="display:none">
+        <h2>Configuración</h2>
+
+        <div class="card" style="margin:10px 0">
+          <h3 style="margin:0 0 8px">Canchas</h3>
+          <div id="listaCanchas"></div>
+          <div class="row" style="margin-top:10px">
+            <button class="btn-ghost" onclick="agregarCancha()">+ Agregar cancha</button>
+            <button class="btn" onclick="guardarCanchas()">Guardar canchas</button>
+          </div>
+          <p class="muted" style="margin-top:8px">
+            Por cancha defina <b>Jugadores totales</b> (ej.: F5 = 10, F7 = 14), <b>Precio por persona</b> y la <b>Seña</b> que se cobrará por la web.
+          </p>
+        </div>
+
+        <div class="card" style="margin:10px 0">
+          <h3 style="margin:0 0 8px">Horarios</h3>
+          <div class="muted" style="margin-bottom:8px">Apertura y cierre por día.</div>
+          <table class="tabla-dia">
+            <thead><tr><th>Día</th><th>Desde</th><th>Hasta</th></tr></thead>
+            <tbody id="tablaHorarios"></tbody>
+          </table>
+          <div class="row" style="margin-top:10px">
+            <button class="btn" onclick="guardarHorarios()">Guardar horarios</button>
+          </div>
+        </div>
+		<div class="card" style="margin:10px 0">
+  <h3 style="margin:0 0 8px">Contacto del dueño</h3>
+  <div class="grid g2">
+    <div>
+      <label class="chip">WhatsApp (ej: 5493511234567)</label>
+      <input id="ownerWhats" placeholder="5493511234567">
+    </div>
+    <div>
+      <label class="chip">Email del dueño</label>
+      <input id="ownerEmail" placeholder="dueno@midominio.com">
+    </div>
+  </div>
+  <div class="row" style="margin-top:10px">
+    <button class="btn" onclick="guardarContactoDueno()">Guardar contacto</button>
+  </div>
+  <p class="muted" style="margin-top:8px">
+    Estos datos se usan para enviar las notificaciones si activás los switches de abajo.
+  </p>
+</div>
+		<section class="card" id="notificaciones">
+  <h3>Notificaciones</h3>
+  
+  <div class="noti-grid">
+  <div class="notificaciones">
+  <h4>Notificaciones automáticas</h4>
+  <label class="switch">
+    <input type="checkbox" id="notifEmail" />
+    <span class="slider"></span> Recibir por Email
+  </label>
+  <label class="switch">
+    <input type="checkbox" id="notifWhats" />
+    <span class="slider"></span> Recibir por WhatsApp
+  </label>
+  <button id="guardarNotif">Guardar notificaciones</button>
+</div>
+
+
+
+    <!-- Email -->
+    <div class="noti-item">
+      <div class="noti-left">
+        <img src="https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/gmail.svg" alt="Gmail" class="noti-icon">
+        <div>
+          <div class="noti-title">Recibir por Email</div>
+          <div class="noti-desc">Se enviará al e-mail del dueño configurado.</div>
+        </div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="swEmail">
+        <span class="slider"></span>
+      </label>
+    </div>
+  </div>
+
+  <div class="noti-preview">
+    <strong>Mensaje de ejemplo:</strong><br>
+    <code>✅ Reserva confirmada: {{nombre}} – {{cancha}} – {{fecha}} {{hora}} – Seña ${{monto}}</code>
+  </div>
+</section>
+
+      </section>
+
+      <!-- (ANALÍTICAS) — indicadores y resúmenes -->
+      <section id="analiticas" class="card" style="display:none">
+        <h2>Analíticas</h2>
+
+        <div class="grid g2">
+          <div>
+            <label class="chip">Desde</label>
+            <input type="date" id="anaDesde">
+          </div>
+          <div>
+            <label class="chip">Hasta</label>
+            <input type="date" id="anaHasta">
+          </div>
+          <div>
+            <label class="chip">Cancha</label>
+            <select id="anaCancha">
+              <option value="__ALL__">Todas</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="sep"></div>
+
+        <!-- KPIs -->
+        <div class="kpi" id="anaKPIs" style="margin-bottom:10px"></div>
+
+        <!-- Ocupación general -->
+        <div class="card" style="margin:10px 0">
+          <h3 style="margin:0 0 8px">Ocupación</h3>
+          <div class="row" style="gap:16px;align-items:center">
+            <div style="min-width:110px"><span id="anaOcupacionTxt" class="estado">—</span></div>
+            <div class="ibar" style="flex:1 1 auto"><i id="anaOcupacionBar" style="width:0%"></i></div>
+          </div>
+        </div>
+
+        <div class="grid g2">
+          <div class="card">
+            <h3 style="margin:0 0 8px">Reservas por día de semana</h3>
+            <table class="tabla-dia">
+              <thead><tr><th>Día</th><th>Cantidad</th></tr></thead>
+              <tbody id="anaTablaSemanal"></tbody>
+            </table>
+          </div>
+
+          <div class="card">
+            <h3 style="margin:0 0 8px">Horas más demandadas</h3>
+            <table class="tabla-dia">
+              <thead><tr><th>Hora</th><th>Cantidad</th></tr></thead>
+              <tbody id="anaTopHoras"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px">
+          <h3 style="margin:0 0 8px">Detalle por cancha</h3>
+          <table class="tabla-dia">
+            <thead><tr><th>Cancha</th><th>Reservas</th><th>Ocupación</th></tr></thead>
+            <tbody id="anaPorCancha"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- (AYUDA) — guía rápida -->
+      <section id="ayuda" class="card" style="display:none">
+        <h2>Ayuda</h2>
+        <ul>
+          <li><b>Reservar</b>: registre una reserva manual cuando el pago no pase por la web (efectivo/transferencia).</li>
+          <li><b>Bloquear</b>: cierre un horario por mantenimiento, torneo o evento interno.</li>
+          <li><b>Cancelar</b>: libera un turno reservado.</li>
+          <li><b>Precio por persona</b>: define el valor por jugador; el sistema calcula el total estimado y sugiere la seña.</li>
+          <li><b>Seña</b>: monto cobrado por la web. Puede diferir del total.</li>
+          <li><b>Caja</b>: exporta un Excel con todas las reservas del período.</li>
+        </ul>
+      </section>
+    </div>
+  </div>
+
+  <!-- ===== JS ===== -->
+<script>
+  /* (ESTADO GLOBAL & HELPERS) */
   const backendUrl = "https://recomplejos-backend.onrender.com";
-  let complejoActivo = "";
   const diasSemana = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
 
-  // ===== Poblar <select> con complejos =====
-  async function poblarSelectComplejos() {
-    try {
-      const data = await fetch(`${backendUrl}/datos_complejos`).then(r => r.json());
-      const sel = document.getElementById("complejo");
-      const previo = localStorage.getItem("complejoActivo") || "";
+  let loginOK = false;
+  let complejoActivo = "";
+  let datosComplejos = {};
+  let datos = {};
+  let reservas = {};
 
-      sel.innerHTML = '<option value="">-- Elegí tu complejo --</option>';
+  const $  = (q)=>document.querySelector(q);
 
-      const items = Object.entries(data).sort((a,b) => {
-        const an = (a[1].nombre || a[0]).toLocaleLowerCase();
-        const bn = (b[1].nombre || b[0]).toLocaleLowerCase();
-        return an.localeCompare(bn, "es", { sensitivity: "base" });
-      });
-
-      for (const [slug, cfg] of items) {
-        const opt = document.createElement("option");
-        opt.value = slug;
-        opt.textContent = `${cfg.nombre || slug}${cfg.ciudad ? ` (${cfg.ciudad})` : ""}`;
-        sel.appendChild(opt);
-      }
-
-      if (previo && data[previo]) sel.value = previo;
-    } catch (e) {
-      console.error("No se pudieron cargar los complejos", e);
-    }
+  /* (TABS) activar secciones */
+  function activar(id){
+    if(!loginOK){ alert("Primero debe iniciar sesión."); return; }
+    document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active', t.dataset.tab===id));
+    document.querySelectorAll('#app section').forEach(s=> s.style.display='none');
+    document.getElementById(id).style.display = 'block';
+    if(id === 'analiticas') renderAnaliticas();  /* ← recalcula al abrir */
   }
 
-  // ===== Login y carga inicial =====
-  window.addEventListener("load", () => {
-    document.getElementById("panel").style.display = "none";
-    document.getElementById("loginPanel").style.display = "block";
-    poblarSelectComplejos();
+  /* (LOADER UI) */
+  function showLoader(msg="Cargando…"){ const o=document.getElementById("loadingOverlay"); const m=document.getElementById("loadingMsg"); if(m) m.textContent=msg; if(o) o.classList.add("show"); }
+  function hideLoader(){ const o=document.getElementById("loadingOverlay"); if(o) o.classList.remove("show"); }
+
+  /* (UTILIDADES FECHAS/CLAVES/MONEDA) */
+  function toISODate(d){ const y=d.getFullYear(); const m=String(d.getMonth()+1).padStart(2,"0"); const dd=String(d.getDate()).padStart(2,"0"); return `${y}-${m}-${dd}`; }
+  function fromISO(s){ const [y,m,d] = s.split("-").map(Number); return new Date(y,m-1,d,0,0,0,0); }
+  function nombreDiaISO(s){ return diasSemana[fromISO(s).getDay()]; }
+  function entre(h, d, hst){ return (d<=hst) ? (h>=d && h<=hst) : (h>=d || h<=hst); }
+  function horaPasada(fechaISO, hora){ const [H,M] = hora.split(":").map(Number); const now = new Date(); const t = fromISO(fechaISO); t.setHours(H,M,0,0); return t < now; }
+  function formatoARS(n){ return new Intl.NumberFormat('es-AR',{style:'currency',currency:'ARS',maximumFractionDigits:0}).format(Number(n||0)); }
+  function claveNueva(cancha, fechaISO, hora){ return `${complejoActivo}-${cancha}-${fechaISO}-${hora}`; }
+  function claveVieja(cancha, nomDia, hora){ return `${complejoActivo}-${cancha}-${nomDia}-${hora}`; }
+
+  /* (INICIO) */
+  document.addEventListener("DOMContentLoaded", async ()=>{
+    await poblarComplejos();
+    const hoy = toISODate(new Date());
+    $("#fechaDia").value = hoy;
+    $("#cajaDesde").value = hoy;
+    $("#cajaHasta").value = hoy;
+    document.getElementById("fechaDia").addEventListener("change", renderDia);
   });
 
-  let reservasActuales = {};
-  function cargarReservas() {
-    return fetch(`${backendUrl}/reservas`)
-      .then(res => res.json())
-      .then(data => { reservasActuales = data; });
+  async function poblarComplejos(){
+    try{
+      const data = await fetch(`${backendUrl}/datos_complejos`).then(r=>r.json());
+      datosComplejos = data || {};
+    }catch(e){
+      console.error("Error cargando datos_complejos:", e);
+      datosComplejos = {};
+    }
+    const sel = $("#complejo");
+    sel.innerHTML = '<option value="">— Seleccione su complejo —</option>';
+    Object.keys(datosComplejos).forEach(k=>{
+      const opt = document.createElement("option");
+      opt.value = k;
+      opt.textContent = datosComplejos[k]?.nombre || k;
+      sel.appendChild(opt);
+    });
+    const qs = new URL(location.href).searchParams.get("complejo");
+    if(qs && sel.querySelector(`[value="${qs}"]`)) sel.value = qs;
   }
 
-  function entrarAdmin() {
-    const complejo = document.getElementById("complejo").value;
-    const clave = document.getElementById("clave").value;
+  /* (LOGIN) estricto: gatea toda la app */
+  async function entrarAdmin(){
+    const complejo = $("#complejo").value.trim();
+    const clave    = $("#clave").value.trim();
+    if(!complejo || !clave){ alert("Complete complejo y contraseña."); return; }
 
-    fetch(`${backendUrl}/login`, {
+    showLoader("Verificando credenciales…");
+    try{
+      const r = await fetch(`${backendUrl}/login`,{
+        method:"POST", headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify({ complejo, password: clave })
+      });
+      const j = await r.json();
+      if(!r.ok || !j.ok) throw new Error("login");
+
+loginOK = true;
+complejoActivo = complejo;
+datos = datosComplejos[complejoActivo] || {};
+
+// mostrar app (una sola vez)
+document.getElementById("loginPanel").style.display = "none";
+document.getElementById("app").style.display = "block";
+
+// switches de notificaciones
+initNotificaciones();
+
+// cargar base + reservas y renderizar
+await cargarBase();
+await cargarReservas();
+cargarControlesTurnos();   // compat
+renderDia();
+
+
+
+      /* (ANALÍTICAS) defaults + listeners */
+      const anaDesde = document.getElementById("anaDesde");
+      const anaHasta = document.getElementById("anaHasta");
+      const anaCancha = document.getElementById("anaCancha");
+      if(anaDesde && anaHasta && anaCancha){
+        const hoy = new Date();
+        const first = new Date(hoy.getFullYear(), hoy.getMonth(), 1);
+        anaDesde.value = toISODate(first);
+        anaHasta.value = toISODate(hoy);
+
+        anaCancha.innerHTML = '<option value="__ALL__">Todas</option>';
+        (datos.canchas||[]).forEach(c=> anaCancha.appendChild(new Option(c.nombre,c.nombre)));
+
+        anaDesde.addEventListener("change", renderAnaliticas);
+        anaHasta.addEventListener("change", renderAnaliticas);
+        anaCancha.addEventListener("change", renderAnaliticas);
+      }
+    }catch(e){
+      alert("Contraseña incorrecta o complejo inválido.");
+    }finally{
+      hideLoader();
+    }
+  }
+function initNotificaciones(){
+  const swEmail = document.getElementById("swEmail");
+  if(!swEmail) return;
+
+  const n = (datos && datos.notif) || {};
+  const eInit = (typeof n.email === "boolean") ? n.email : (localStorage.getItem("notifEmail") === "1");
+  swEmail.checked = !!eInit;
+
+  async function persistir(){
+    localStorage.setItem("notifEmail", swEmail.checked ? "1" : "0");
+    try{
+      // si ya migraste a DB, mejor pegale a /complejos/:id/contacto
+      await fetch(`${backendUrl}/complejos/${complejoActivo}/contacto`,{
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify({ notif_email: swEmail.checked })
+      });
+      // compat JSON (si seguís usando /guardarDatos para otras cosas)
+      const all = await fetch(`${backendUrl}/datos_complejos`).then(r=>r.json());
+      all[complejoActivo] = { ...(all[complejoActivo]||{}), ...(datos||{}), notif: { email: swEmail.checked } };
+      await fetch(`${backendUrl}/guardarDatos`,{ method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(all) });
+      datos.notif = { ...(datos.notif||{}), email: swEmail.checked };
+    }catch(e){
+      console.error("No se pudo guardar la preferencia de notificación:", e);
+    }
+  }
+
+  swEmail.onchange = persistir;
+}
+
+
+  function cargarControlesTurnos(){ /* intencionalmente vacío (compat) */ }
+
+  /* (BASE Y RESERVAS) */
+  async function cargarBase(){
+    // horarios
+    const tbody = $("#tablaHorarios"); tbody.innerHTML = "";
+    const orden = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"];
+    for(const dia of orden){
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td style="width:160px">${dia}</td>
+        <td><select id="h_${dia}_desde"></select></td>
+        <td><select id="h_${dia}_hasta"></select></td>`;
+      tbody.appendChild(tr);
+      const s1 = tr.querySelector(`#h_${dia}_desde`);
+      const s2 = tr.querySelector(`#h_${dia}_hasta`);
+      for(let h=0; h<=23; h++){
+        const hh = String(h).padStart(2,"0")+":00";
+        s1.appendChild(new Option(hh,hh));
+        s2.appendChild(new Option(hh,hh));
+      }
+      s1.value = datos?.horarios?.[dia]?.desde || "18:00";
+      s2.value = datos?.horarios?.[dia]?.hasta || "23:00";
+    }
+    // canchas
+    pintarCanchas(datos.canchas || []);
+    // selector cancha
+    const sel = $("#selCancha");
+    sel.innerHTML = "";
+    (datos.canchas||[]).forEach(c=> sel.appendChild(new Option(c.nombre, c.nombre)));
+    sel.addEventListener("change", renderDia);
+    actualizarChipsPrecio();
+pintarContactoDueno();   // completa ownerWhats / ownerEmail con lo guardado 
+ }
+
+
+  async function cargarReservas(){
+    reservas = await fetch(`${backendUrl}/reservas`).then(r=>r.json()).catch(()=> ({}));
+    return reservas;
+  }
+
+  /* (CONFIG → CANCHAS) */
+  function pintarCanchas(arr){
+    const cont = $("#listaCanchas"); cont.innerHTML = "";
+    if(!arr.length){
+      cont.innerHTML = `<div class="muted">No hay canchas cargadas.</div>`;
+      return;
+    }
+    arr.forEach((c,idx)=>{
+      const div = document.createElement("div");
+      div.className="grid g3";
+      div.style.margin="8px 0";
+      div.innerHTML = `
+        <div>
+          <label class="chip">Nombre</label>
+          <input id="cancha_${idx}" value="${c.nombre||""}" placeholder="Ej.: Fútbol 5">
+        </div>
+        <div>
+          <label class="chip">Jugadores totales</label>
+          <input id="cancha_${idx}_jug" value="${c.jugadores|| (c.nombre?.includes('7')?14: (c.nombre?.includes('5')?10:""))}" inputmode="numeric" placeholder="Ej.: 10 / 14">
+        </div>
+        <div>
+          <label class="chip">Precio por persona (ARS)</label>
+          <input id="cancha_${idx}_pp" value="${c.precioPP||""}" inputmode="numeric" placeholder="Ej.: 1200">
+        </div>
+        <div>
+          <label class="chip">Seña (ARS)</label>
+          <input id="cancha_${idx}_senia" value="${c.senia||""}" inputmode="numeric" placeholder="Ej.: 3000">
+        </div>
+        <div style="display:flex;align-items:flex-end;gap:8px">
+          <button class="btn-ghost" onclick="quitarCancha(${idx})">Quitar</button>
+        </div>
+      `;
+      cont.appendChild(div);
+    });
+  }
+  function agregarCancha(){
+    datos.canchas = datos.canchas || [];
+    datos.canchas.push({ nombre:"", jugadores:"", precioPP:"", senia:"" });
+    pintarCanchas(datos.canchas);
+  }
+  function quitarCancha(i){
+    (datos.canchas||[]).splice(i,1);
+    pintarCanchas(datos.canchas||[]);
+    guardarCanchas(true);
+  }
+  async function guardarCanchas(silent=false){
+    const arr = (datos.canchas||[]).map((c,idx)=>({
+      nombre:   document.getElementById(`cancha_${idx}`).value.trim(),
+      jugadores:Number(document.getElementById(`cancha_${idx}_jug`).value||0),
+      precioPP: Number(document.getElementById(`cancha_${idx}_pp`).value||0),
+      senia:    Number(document.getElementById(`cancha_${idx}_senia`).value||0),
+    }));
+    datos.canchas = arr;
+    const all = await fetch(`${backendUrl}/datos_complejos`).then(r=>r.json());
+    all[complejoActivo] = { ...(all[complejoActivo]||{}), ...datos, canchas: arr };
+    await fetch(`${backendUrl}/guardarDatos`, { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(all) });
+    if(!silent) alert("Canchas guardadas.");
+    const sel = $("#selCancha"); sel.innerHTML = ""; arr.forEach(c=> sel.appendChild(new Option(c.nombre,c.nombre)));
+    actualizarChipsPrecio();
+
+    // actualizar lista de canchas en Analíticas
+    const anaSel = document.getElementById("anaCancha");
+    if(anaSel){
+      anaSel.innerHTML = '<option value="__ALL__">Todas</option>';
+      (datos.canchas||[]).forEach(c=> anaSel.appendChild(new Option(c.nombre,c.nombre)));
+    }
+  }
+
+  /* (CONFIG → HORARIOS) */
+  function leerHorariosForm(){
+    const out = {};
+    const orden = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"];
+    for(const d of orden){
+      out[d] = { desde: document.getElementById(`h_${d}_desde`).value, hasta: document.getElementById(`h_${d}_hasta`).value };
+    }
+    return out;
+  }
+  async function guardarHorarios(){
+    const all = await fetch(`${backendUrl}/datos_complejos`).then(r=>r.json());
+    all[complejoActivo] = all[complejoActivo] || {};
+    all[complejoActivo].horarios = leerHorariosForm();
+    await fetch(`${backendUrl}/guardarDatos`,{ method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(all) });
+    alert("Horarios guardados.");
+  }
+ async function guardarContactoDueno() {
+  const payload = {
+    owner_phone: document.getElementById("ownerWhats").value.trim(),
+    owner_email: document.getElementById("ownerEmail").value.trim(),
+    notif_whats: document.getElementById("swWhats")?.checked || false,
+    notif_email: document.getElementById("swEmail")?.checked || false
+  };
+  try {
+    const r = await fetch(`${backendUrl}/complejos/${complejoActivo}/contacto`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ complejo, password: clave })
-    })
-    .then(res => { if (!res.ok) throw new Error("Login fallido"); return res.json(); })
-    .then(() => {
-      complejoActivo = complejo;
-      localStorage.setItem("complejoActivo", complejo);
-      document.getElementById("panel").style.display = "block";
-      document.getElementById("loginPanel").style.display = "none";
-      document.getElementById("tituloComplejo").textContent = `Administración: ${complejo}`;
-      cargarDatos();
-      cargarReservas().then(cargarTurnos);
-    })
-    .catch(() => alert("Contraseña incorrecta"));
-  }
-
-  function cerrarSesion() { location.reload(); }
-
-  // ===== Datos, horarios, servicios, canchas =====
-  function cargarDatos() {
-    fetch(`${backendUrl}/datos_complejos`)
-      .then(res => res.json())
-      .then(data => {
-        const info = data[complejoActivo] || {};
-        document.getElementById("nombreComplejo").value = info.nombre || "";
-        document.getElementById("ciudadComplejo").value = info.ciudad || "";
-        document.getElementById("iframeMapa").value = info.maps || "";
-
-        document.querySelectorAll("#listaServicios input").forEach(cb => {
-          cb.checked = (info.servicios || []).includes(cb.value);
-        });
-
-        const preview = document.getElementById("preview");
-        preview.innerHTML = "";
-        (info.imagenes || []).forEach((src, index) => {
-          const div = document.createElement("div");
-          const img = document.createElement("img"); img.src = src;
-          const btn = document.createElement("button"); btn.textContent = "Eliminar";
-          btn.onclick = () => eliminarImagen(index);
-          div.appendChild(img); div.appendChild(btn); preview.appendChild(div);
-        });
-
-        const horarios = info.horarios || {};
-        const tabla = document.getElementById("tablaHorarios");
-        tabla.innerHTML = "";
-        const ordenDias = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"];
-        ordenDias.forEach(dia => {
-          const fila = document.createElement("tr");
-          const desde = document.createElement("select");
-          const hasta = document.createElement("select");
-          for (let h = 0; h <= 23; h++) {
-            const hora = h.toString().padStart(2, "0") + ":00";
-            desde.appendChild(new Option(hora, hora));
-            hasta.appendChild(new Option(hora, hora));
-          }
-          desde.value = horarios?.[dia]?.desde || "18:00";
-          hasta.value = horarios?.[dia]?.hasta || "23:00";
-          fila.innerHTML = `<td>${dia}</td>`;
-          const td1 = document.createElement("td"); td1.appendChild(desde);
-          const td2 = document.createElement("td"); td2.appendChild(hasta);
-          fila.appendChild(td1); fila.appendChild(td2);
-          tabla.appendChild(fila);
-        });
-
-        mostrarCanchas(info.canchas || []);
-      });
-  }
-
-  function mostrarCanchas(canchas) {
-    const lista = document.getElementById("listaCanchas");
-    lista.innerHTML = "";
-    canchas.forEach((cancha, index) => {
-      const div = document.createElement("div");
-      div.innerHTML = `
-        <label>Nombre de la cancha</label><br/>
-        <input id="nombreCancha${index}" value="${cancha.nombre || ''}" placeholder="Nombre de la cancha" /><br/>
-        <label>Precio total de la cancha</label><br/>
-        <input id="precioTotal${index}" value="${cancha.precioTotal || ''}" placeholder="Precio total" /><br/>
-        <label>Precio por jugador</label><br/>
-        <input id="precioPorJugador${index}" value="${cancha.precioPorJugador || ''}" placeholder="Precio por jugador" /><br/>
-        <label>Cantidad de jugadores</label><br/>
-        <input id="jugadores${index}" value="${cancha.jugadores || ''}" placeholder="Cantidad de jugadores" /><br/>
-        <label>Seña obligatoria por turno</label><br/>
-        <input id="senia${index}" value="${cancha.senia || ''}" placeholder="Ej: 3000" /><br/>
-        <button onclick="eliminarCancha(${index})">Eliminar</button>
-        <hr/>
-      `;
-      lista.appendChild(div);
+      body: JSON.stringify(payload)
     });
+    const j = await r.json();
+    if (j.ok) alert("Contacto guardado en base de datos ✔");
+    else throw new Error("Respuesta inválida");
+  } catch (e) {
+    console.error("Error guardando contacto:", e);
+    alert("No se pudo guardar el contacto en la base.");
   }
+}
 
-  function guardarCanchas() {
-    const divs = document.querySelectorAll("#listaCanchas > div");
-    const nuevas = [];
-    divs.forEach((div, i) => {
-      nuevas.push({
-        nombre: document.getElementById(`nombreCancha${i}`).value,
-        precioTotal: document.getElementById(`precioTotal${i}`).value,
-        precioPorJugador: document.getElementById(`precioPorJugador${i}`).value,
-        jugadores: document.getElementById(`jugadores${i}`).value,
-        senia: document.getElementById(`senia${i}`).value
-      });
-    });
-    guardarEnJson({ canchas: nuevas });
-    alert("Canchas guardadas");
-    cargarTurnos();
+function pintarContactoDueno(){
+  const w = document.getElementById("ownerWhats");
+  const e = document.getElementById("ownerEmail");
+  if(!w || !e) return;
+  w.value = datos?.whatsappDueño || "";
+  e.value = datos?.emailDueño   || "";
+}
+
+
+  /* ===================== (TELÉFONO) NORMALIZACIÓN Y VISUAL ===================== */
+  function normalizarTelefono(raw){
+    if(!raw) return "";
+    let d = String(raw).replace(/\D/g,'');
+    if(d.startsWith('00')) d = d.slice(2);
+    if(d.startsWith('0'))  d = d.slice(1);
+    if(d.startsWith('54') && !d.startsWith('549') && d.length>=11){ d = '549' + d.slice(2); }
+    if(!d.startsWith('54') && (d.length===10 || d.length===11)){ d = '549' + d; }
+    return '+' + d;
   }
-
-  function agregarCancha() {
-    fetch(`${backendUrl}/datos_complejos`)
-      .then(r => r.json())
-      .then(json => {
-        const info = json[complejoActivo] || {};
-        info.canchas = info.canchas || [];
-        info.canchas.push({ nombre: "", precioTotal: "", precioPorJugador: "", jugadores: "", senia: "" });
-        guardarEnJson({ canchas: info.canchas });
-        cargarDatos();
-      });
+  function telefonoValido(raw){
+    const d = String(raw).replace(/\D/g,'');
+    return d.length>=10 && d.length<=15;
   }
-
-  function guardarHorarios() {
-    const tabla = document.querySelectorAll("#tablaHorarios tr");
-    const nuevos = {};
-    tabla.forEach(fila => {
-      const dia = fila.children[0].textContent;
-      const desde = fila.children[1].querySelector("select").value;
-      const hasta = fila.children[2].querySelector("select").value;
-      nuevos[dia] = { desde, hasta };
-    });
-    guardarEnJson({ horarios: nuevos });
-    alert("Horarios guardados");
-    cargarTurnos();
+  function mostrarTelefonoCorto(tel){
+    if(!tel) return "s/d";
+    const d = tel.replace(/\D/g,'');
+    if(d.startsWith('549') && d.length>=12){ return `+54 9 ${d.slice(3,6)} ${d.slice(6,9)} ${d.slice(9)}`; }
+    if(tel.startsWith('+')) return tel;
+    return '+'+d;
   }
+  /* ============================================================================ */
 
-  function guardarDatosGenerales() {
-    const nombre = document.getElementById("nombreComplejo").value;
-    const ciudad = document.getElementById("ciudadComplejo").value;
-    const maps = document.getElementById("iframeMapa").value;
-    guardarEnJson({ nombre, ciudad, maps });
-    alert("Datos generales guardados");
+  /* (TABLERO) — datos de cancha y render del día */
+  function datosCanchaActual(){
+    const cancha = document.getElementById("selCancha").value;
+    const c = (datos.canchas||[]).find(x=> x.nombre===cancha) || {};
+    const jugadores = Number(c.jugadores||0);
+    const pp = Number(c.precioPP||0);
+    const senia = Number(c.senia||0);
+    const total = jugadores*pp;
+    return { cancha, jugadores, pp, senia, total };
   }
-
-  function guardarServicios() {
-    const seleccionados = Array.from(document.querySelectorAll("#listaServicios input:checked")).map(cb => cb.value);
-    guardarEnJson({ servicios: seleccionados });
-    alert("Servicios guardados");
-  }
-
-  function eliminarCancha(index) {
-    fetch(`${backendUrl}/datos_complejos`)
-      .then(r => r.json())
-      .then(json => {
-        const info = json[complejoActivo] || {};
-        info.canchas.splice(index, 1);
-        guardarEnJson({ canchas: info.canchas });
-        cargarDatos();
-      });
-  }
-
-  function eliminarImagen(index) {
-    fetch(`${backendUrl}/datos_complejos`)
-      .then(r => r.json())
-      .then(json => {
-        const info = json[complejoActivo] || {};
-        info.imagenes.splice(index, 1);
-        guardarEnJson({ imagenes: info.imagenes });
-        cargarDatos();
-      });
-  }
-
-  function guardarEnJson(parcial) {
-    fetch(`${backendUrl}/datos_complejos`)
-      .then(res => res.json())
-      .then(json => {
-        json[complejoActivo] = { ...json[complejoActivo], ...parcial };
-        fetch(`${backendUrl}/guardarDatos`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(json)
-        });
-      });
-  }
-
-  // ===== Turnos (render) =====
-  function cargarTurnos() {
-    fetch(`${backendUrl}/datos_complejos`)
-      .then(r => r.json())
-      .then(json => {
-        const info = json[complejoActivo] || {};
-        fetch(`${backendUrl}/reservas`)
-          .then(r => r.json())
-          .then(reservas => {
-            const container = document.getElementById("tablasTurnosCanchas");
-            container.innerHTML = "";
-
-            const canchas = info.canchas || [];
-            for (const cancha of canchas) {
-              const div = document.createElement("div");
-              const idTabla = `turnosAdmin-${(cancha.nombre || 'cancha').replace(/\s+/g, '_')}`;
-              div.innerHTML = `<h3>${cancha.nombre || "Cancha"}</h3><div id="${idTabla}"></div>`;
-              container.appendChild(div);
-              renderTablaTurnosAdmin(info, cancha, reservas, idTabla);
-            }
-          });
-      });
-  }
-
-  function renderTablaTurnosAdmin(info, cancha, reservas, contenedorId) {
-    const horarios = info.horarios || {};
-    const hoy = new Date();
-    const container = document.getElementById(contenedorId);
-
-    let html = '<table class="turnos"><thead><tr><th>Hora</th>';
-
-    const dias = [];
-    for (let i = 0; i < 7; i++) {
-      const fecha = new Date();
-      fecha.setDate(hoy.getDate() + i);
-      const nombreDia = diasSemana[fecha.getDay()];
-      const dia = String(fecha.getDate()).padStart(2, '0');
-      const mes = String(fecha.getMonth() + 1).padStart(2, '0');
-      dias.push({ nombre: nombreDia, fecha: `${dia}/${mes}`, fechaReal: fecha });
-      html += `<th>${nombreDia}<br>${dia}/${mes}</th>`;
+  function actualizarChipsPrecio(){
+    const { jugadores, pp, senia, total } = datosCanchaActual();
+    const chipPrecio = document.getElementById("chipPrecio");
+    const chipSenia  = document.getElementById("chipSenia");
+    if(chipPrecio){
+      chipPrecio.textContent = (jugadores && pp)
+        ? `Precio p/p: ${formatoARS(pp)} · Jugadores: ${jugadores} · Total estimado: ${formatoARS(total)}`
+        : "Defina precio por persona y jugadores en Config.";
     }
+    if(chipSenia){
+      chipSenia.textContent = senia ? `Seña web: ${formatoARS(senia)}` : "Seña web no definida (Config → Canchas).";
+    }
+  }
 
-    html += '</tr></thead><tbody>';
+  function rangoDia(fechaISO){
+    const nd = nombreDiaISO(fechaISO);
+    const h  = (datos.horarios||{})[nd] || {};
+    const desde = h.desde || "18:00";
+    const hasta = h.hasta || "23:00";
+    return {desde,hasta};
+  }
 
-    for (let h = 0; h < 24; h++) {
-      const hora = `${String(h).padStart(2, '0')}:00`;
+  function renderDia(){
+    const fechaISO = document.getElementById("fechaDia").value;
+    const cancha   = document.getElementById("selCancha").value;
+    if(!fechaISO || !cancha) return;
+    actualizarChipsPrecio();
 
-      const mostrarFila = dias.some(d => {
-        const hDia = getHorario(horarios, d.nombre);
-        return entre(hora, hDia.desde || '18:00', hDia.hasta || '23:00');
-      });
-      if (!mostrarFila) continue;
+    const {desde, hasta} = rangoDia(fechaISO);
+    const cuerpo = document.getElementById("tbodyDia");
+    cuerpo.innerHTML = "";
 
-      html += `<tr><td>${hora}</td>`;
+    let libres=0, reservados=0, bloqueados=0;
+    for(let h=0; h<24; h++){
+      const hora = `${String(h).padStart(2,"0")}:00`;
+      if(!entre(hora, desde, hasta)) continue;
 
-      for (const d of dias) {
-        const clave = `${complejoActivo}-${cancha.nombre}-${d.nombre}-${hora}`;
-        const turno = reservas[clave];
+      const kNew  = claveNueva(cancha, fechaISO, hora);
+      const kOld  = claveVieja(cancha, nombreDiaISO(fechaISO), hora);
+      const r     = reservas[kNew] || reservas[kOld];
 
-        const hDia = getHorario(horarios, d.nombre);
-        const desde = hDia.desde || '18:00';
-        const hasta = hDia.hasta || '23:00';
+      let clase = "ok", estadoTxt = "Libre";
+      let acciones = `
+        <button class="btn" onclick="reservarManual('${kNew}','${kOld}')">Reservar</button>
+        <button class="btn-warn" onclick="bloquearTurno('${kNew}','${kOld}')">Bloquear</button>
+      `;
+      if(horaPasada(fechaISO, hora)) { clase += " pasado"; }
 
-        if (!entre(hora, desde, hasta)) {
-          html += '<td class="deshabilitado">Cerrado</td>';
-        } else if (turno?.bloqueado) {
-          html += `<td class="bloque">Bloqueado<br>
-                     <button class="btn-mini secondary" onclick="desbloquearTurno('${clave}')">✔️</button>
-                   </td>`;
-        } else if (turno) {
-          html += `<td class="reservado">
-                     ${turno.nombre}<br><small>${turno.telefono || ''}</small><br>
-                     <button class="btn-mini secondary" onclick="cancelarTurno('${clave}')">❌</button>
-                   </td>`;
-        } else {
-          html += `<td class="disponible">
-                     Disponible<br>
-                     <button class="btn-mini" onclick="bloquearTurno('${clave}')">🚫</button>
-                   </td>`;
-        }
+      if(r?.bloqueado){
+        clase="bloq"; estadoTxt="Bloqueado"; bloqueados++;
+        acciones = `<button class="btn" onclick="desbloquearTurno('${kNew}','${kOld}')">Eliminar bloqueo</button>`;
+      } else if(r){
+        clase="res";
+        const nombre   = r.nombre   ? r.nombre   : "—";
+        const telefono = r.telefono ? mostrarTelefonoCorto(r.telefono) : "s/d";
+        estadoTxt = `Reservado · ${nombre} · ${telefono}`;
+        reservados++;
+        acciones = `<button class="btn-danger" onclick="cancelarTurno('${kNew}','${kOld}')">Cancelar</button>`;
+      } else {
+        libres++;
       }
 
-      html += '</tr>';
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td style="width:110px">${hora}</td>
+        <td class="${clase}">
+          <div class="slot">
+            <div class="estado">${estadoTxt}</div>
+            <div class="row">${acciones}</div>
+          </div>
+        </td>`;
+      cuerpo.appendChild(tr);
     }
 
-    html += '</tbody></table>';
-    container.innerHTML = `<div class="tabla-scroll">${html}</div>`;
+    document.getElementById("resumenDia").innerHTML = `
+      <div class="box"><div class="chip">Libres</div><div class="num">${libres}</div></div>
+      <div class="box"><div class="chip">Reservados</div><div class="num">${reservados}</div></div>
+      <div class="box"><div class="chip">Bloqueados</div><div class="num">${bloqueados}</div></div>
+    `;
   }
 
-  // ===== Acciones de reservas (admin) =====
-  function cancelarTurno(clave) {
-    if (!confirm("¿Seguro que querés cancelar esta reserva?")) return;
-    fetch(`${backendUrl}/reservas`)
-      .then(r => r.json())
-      .then(json => { delete json[clave]; guardarReservas(json); });
+  /* (TABLERO → ACCIONES DE TURNOS) — teléfono opcional para el dueño */
+  async function reservarManual(kNew,kOld){
+  const nombre = prompt("Nombre del cliente:");
+  if (!nombre) return;
+
+  let telefono = prompt("Teléfono (WhatsApp) — opcional:");
+  if (telefono === null) return;
+  telefono = (telefono || "").trim();
+  if (telefono) {
+    if (!telefonoValido(telefono)) {
+      const seguir = confirm("El número parece inválido. ¿Guardar sin teléfono?");
+      if (!seguir) return;
+      telefono = "";
+    } else {
+      telefono = normalizarTelefono(telefono);
+    }
   }
 
-  function bloquearTurno(clave) {
-    fetch(`${backendUrl}/reservas`)
-      .then(r => r.json())
-      .then(json => { json[clave] = { bloqueado: true }; guardarReservas(json); });
-  }
+  const { senia, total } = datosCanchaActual();
+  const sugerida = senia || Math.round(total*0.3);
+  const monto = Number(prompt("Seña cobrada ($):", String(sugerida))||"0");
 
-  function desbloquearTurno(clave) {
-    fetch(`${backendUrl}/reservas`)
-      .then(r => r.json())
-      .then(json => { delete json[clave]; guardarReservas(json); });
-  }
+  await cargarY(()=>{
+    if(reservas[kNew]?.bloqueado){ alert("El horario está bloqueado."); return; }
+    reservas[kNew] = { status:"manual", nombre, telefono, monto, creado:Date.now() };
+    delete reservas[kOld];
+  });
 
-  function guardarReservas(json) {
-    fetch(`${backendUrl}/guardarReservas`, {
+  // 👇 AVISO AL BACKEND (adentro de la función)
+  try{
+    await fetch(`${backendUrl}/notificar-manual`,{
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(json)
-    }).then(() => {
-      alert("Reserva actualizada");
-      cargarTurnos();
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({
+        clave: kNew,
+        complejoId: complejoActivo,
+        nombre,
+        telefono,
+        monto
+      })
+    });
+  }catch(e){ console.warn("No se pudo notificar la reserva manual:", e); }
+}
+
+
+  function guardarTodo(obj){
+    return fetch(`${backendUrl}/guardarReservas`,{
+      method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(obj||{})
+    }).then(r=>r.json());
+  }
+  async function cargarY(fn){ await cargarReservas(); await fn(); await guardarTodo(reservas); renderDia(); }
+
+  function cancelarTurno(kNew,kOld){
+    if(!confirm("¿Confirma la cancelación de la reserva?")) return;
+    cargarY(()=>{ delete reservas[kNew]; delete reservas[kOld]; });
+  }
+  function bloquearTurno(kNew,kOld){
+    cargarY(()=>{ reservas[kNew]={bloqueado:true, creado:Date.now()}; delete reservas[kOld]; });
+  }
+  function desbloquearTurno(kNew,kOld){
+    cargarY(()=>{ delete reservas[kNew]; delete reservas[kOld]; });
+  }
+  /* ========================= (ANALÍTICAS) ========================= */
+  function iterarDias(desdeISO, hastaISO, cb){
+    const d0 = fromISO(desdeISO);
+    const d1 = fromISO(hastaISO);
+    for(let d=new Date(d0); d<=d1; d.setDate(d.getDate()+1)){
+      cb(new Date(d));
+    }
+  }
+  function horasRangoParaFecha(fechaISO){
+    const nd = nombreDiaISO(fechaISO);
+    const h  = (datos.horarios||{})[nd] || {};
+    const desde = h.desde || "18:00";
+    const hasta = h.hasta || "23:00";
+    const out = [];
+    for(let H=0; H<24; H++){
+      const hh = `${String(H).padStart(2,"0")}:00`;
+      if(entre(hh, desde, hasta)) out.push(hh);
+    }
+    return out;
+  }
+  function contarSlotsRango(desdeISO, hastaISO, canchaNameOrAll="__ALL__"){
+    let total = 0;
+    const canchas = (canchaNameOrAll==="__ALL__") ? (datos.canchas||[]).map(c=>c.nombre) : [canchaNameOrAll];
+    iterarDias(desdeISO, hastaISO, d=>{
+      const f = toISODate(d);
+      const horas = horasRangoParaFecha(f);
+      total += horas.length * canchas.length;
+    });
+    return total;
+  }
+  function canchaInfo(nombre){
+    const c = (datos.canchas||[]).find(x=> x.nombre===nombre) || {};
+    return { jugadores: Number(c.jugadores||0), precioPP: Number(c.precioPP||0), senia: Number(c.senia||0) };
+  }
+  function renderAnaliticas(){
+    if(!loginOK) return;
+    const desde = document.getElementById("anaDesde")?.value;
+    const hasta = document.getElementById("anaHasta")?.value;
+    const selCancha = document.getElementById("anaCancha")?.value || "__ALL__";
+    if(!desde || !hasta) return;
+
+    let reservasCont = 0, bloqueosCont = 0;
+    let seniasCobradas = 0, totalEstimado = 0;
+    const porDiaSemana = {Domingo:0,Lunes:0,Martes:0,Miércoles:0,Jueves:0,Viernes:0,Sábado:0};
+    const porHora = {};
+    const porCancha = {};
+
+    for(const k of Object.keys(reservas||{})){
+      const p = parseClave(k); if(!p || p.complejo!==complejoActivo) continue;
+      if(p.tipo==="nuevo"){
+        if(desde && p.fechaISO < desde) continue;
+        if(hasta && p.fechaISO > hasta) continue;
+      } else { continue; }
+      if(selCancha!=="__ALL__" && p.cancha !== selCancha) continue;
+
+      const r = reservas[k] || {};
+      if(r.bloqueado){ bloqueosCont++; continue; }
+
+      reservasCont++;
+      seniasCobradas += Number(r.monto || r.senia || r.precio || 0) || 0;
+
+      const ci = canchaInfo(p.cancha);
+      totalEstimado += (ci.jugadores||0) * (ci.precioPP||0);
+
+      try{
+        const dname = diasSemana[fromISO(p.fechaISO).getDay()];
+        porDiaSemana[dname] = (porDiaSemana[dname]||0) + 1;
+      }catch(_){}
+      porHora[p.hora] = (porHora[p.hora]||0) + 1;
+      porCancha[p.cancha] = (porCancha[p.cancha]||0) + 1;
+    }
+
+    const slots = contarSlotsRango(desde, hasta, selCancha);
+    const ocupacion = slots ? Math.round((reservasCont/slots)*100) : 0;
+
+    document.getElementById("anaKPIs").innerHTML = `
+      <div class="box"><div class="chip">Reservas</div><div class="num">${reservasCont}</div></div>
+      <div class="box"><div class="chip">Señas cobradas</div><div class="num">${formatoARS(seniasCobradas)}</div></div>
+      <div class="box"><div class="chip">Total estimado</div><div class="num">${formatoARS(totalEstimado)}</div></div>
+      <div class="box"><div class="chip">Bloqueos</div><div class="num">${bloqueosCont}</div></div>
+    `;
+
+    const bar = document.getElementById("anaOcupacionBar");
+    const txt = document.getElementById("anaOcupacionTxt");
+    if(bar) bar.style.width = ocupacion + "%";
+    if(txt) txt.textContent = `${ocupacion}% de ocupación (${reservasCont}/${slots||0} turnos)`;
+
+    const orden = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"];
+    const tSem = document.getElementById("anaTablaSemanal");
+    tSem.innerHTML = "";
+    orden.forEach(d=>{
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${d}</td><td>${porDiaSemana[d]||0}</td>`;
+      tSem.appendChild(tr);
+    });
+
+    const tHoras = document.getElementById("anaTopHoras");
+    tHoras.innerHTML = "";
+    Object.entries(porHora).sort((a,b)=> b[1]-a[1]).slice(0,8).forEach(([hora,cant])=>{
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${hora}</td><td>${cant}</td>`;
+      tHoras.appendChild(tr);
+    });
+
+    const tCancha = document.getElementById("anaPorCancha");
+    tCancha.innerHTML = "";
+    const canchasList = (selCancha==="__ALL__") ? (datos.canchas||[]).map(c=>c.nombre) : [selCancha];
+    canchasList.forEach(cn=>{
+      const resC = porCancha[cn]||0;
+      const sC = contarSlotsRango(desde, hasta, cn);
+      const occC = sC ? Math.round((resC/sC)*100) : 0;
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${cn}</td>
+        <td>${resC}</td>
+        <td>
+          <div class="row" style="gap:10px;align-items:center">
+            <div style="min-width:52px">${occC}%</div>
+            <div class="ibar" style="width:180px"><i style="width:${occC}%"></i></div>
+          </div>
+        </td>`;
+      tCancha.appendChild(tr);
     });
   }
-  </script>
+  /* =============================================================== */
+
+  /* (CAJA → EXCEL) */
+  function parseClave(k){
+    let m = k.match(/^(.+?)-(.+?)-(\d{4}-\d{2}-\d{2})-(\d{2}:\d{2})$/);
+    if(m) return { complejo:m[1], cancha:m[2], fechaISO:m[3], hora:m[4], tipo:"nuevo" };
+    m = k.match(/^(.+?)-(.+?)-([A-Za-zÁÉÍÓÚáéíóúÑñ]+)-(\d{2}:\d{2})$/);
+    if(m) return { complejo:m[1], cancha:m[2], diaNombre:m[3], hora:m[4], tipo:"viejo" };
+    return null;
+  }
+  function canchaInfo(nombre){
+    const c = (datos.canchas||[]).find(x=> x.nombre===nombre) || {};
+    return { jugadores: Number(c.jugadores||0), precioPP: Number(c.precioPP||0), senia: Number(c.senia||0) };
+  }
+
+  async function exportarExcel(){
+    if(!loginOK){ alert("Inicie sesión para exportar."); return; }
+    await cargarReservas();
+    const desde = document.getElementById("cajaDesde").value;
+    const hasta = document.getElementById("cajaHasta").value;
+
+    const rows = [];
+    for(const k of Object.keys(reservas)){
+      const p = parseClave(k); if(!p || p.complejo!==complejoActivo) continue;
+
+      if(p.tipo==="nuevo"){
+        if(desde && p.fechaISO < desde) continue;
+        if(hasta && p.fechaISO > hasta) continue;
+      } else {
+        if(desde || hasta) continue;
+      }
+
+      const r = reservas[k] || {};
+      const { jugadores, precioPP } = canchaInfo(p.cancha);
+      const totalEstimado = jugadores * precioPP;
+
+      const estado =
+        r.bloqueado ? "Bloqueado" :
+        r.status==="approved" ? "Pagado" :
+        r.status==="manual" ? "Reservado (manual)" :
+        "Reservado";
+
+      rows.push({
+        "Fecha": (p.fechaISO || p.diaNombre || ""),
+        "Cancha": p.cancha,
+        "Hora": p.hora,
+        "Estado": estado,
+        "Cliente": r.nombre || "",
+        "Teléfono": r.telefono || "",
+        "Precio p/p": precioPP || "",
+        "Jugadores": jugadores || "",
+        "Total estimado": totalEstimado || "",
+        "Seña cobrada": r.monto || r.senia || r.precio || ""
+      });
+    }
+
+    if(!rows.length){ alert("No hay movimientos en el período seleccionado."); return; }
+
+    const ws = XLSX.utils.json_to_sheet(rows, { origin: "A2" });
+    XLSX.utils.sheet_add_aoa(ws, [["Caja – " + (datos.nombre||complejoActivo)]], {origin:"A1"});
+    ws["!merges"] = [{ s:{r:0,c:0}, e:{r:0,c:9} }];
+
+    ws["!cols"] = [
+      {wch:12}, {wch:18}, {wch:8}, {wch:18}, {wch:22}, {wch:14}, {wch:12}, {wch:10}, {wch:14}, {wch:14}
+    ];
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Caja");
+    const nombreArchivo = `caja_${complejoActivo}_${(desde||"todo")}_${(hasta||"")}.xlsx`;
+    XLSX.writeFile(wb, nombreArchivo);
+  }
+  async function guardarContacto() {
+  const complexId = state.complexId; // como lo obtengas hoy
+  const payload = {
+    owner_phone: document.querySelector('#inputTel').value.trim(),
+    owner_email: document.querySelector('#inputEmail').value.trim(),
+    notif_whats: document.querySelector('#chkNotifWhats').checked,
+    notif_email: document.querySelector('#chkNotifEmail').checked
+  };
+  await fetch(`${API_BASE}/complejos/${complexId}/contacto`, {
+    method: 'POST',
+    headers: { 'Content-Type':'application/json' },
+    body: JSON.stringify(payload)
+  });
+  alert('Contacto guardado ✔');
+}
+async function cargarContacto() {
+  const complexId = state.complexId;
+  const r = await fetch(`${API_BASE}/complejos/${complexId}/contacto`);
+  const { ok, data } = await r.json();
+  if (ok && data) {
+    document.querySelector('#inputTel').value = data.owner_phone || '';
+    document.querySelector('#inputEmail').value = data.owner_email || '';
+    document.querySelector('#chkNotifWhats').checked = !!data.notif_whats;
+    document.querySelector('#chkNotifEmail').checked = !!data.notif_email;
+  }
+}
+async function guardarMP() {
+  const complexId = state.complexId;
+  const payload = {
+    mp_user_id: document.querySelector('#mpUserId').value.trim() || null,
+    mp_public_key: document.querySelector('#mpPK').value.trim() || null,
+    mp_access_token: document.querySelector('#mpAT').value.trim() || null,
+    mp_refresh_token: document.querySelector('#mpRT').value.trim() || null
+  };
+  await fetch(`${API_BASE}/complejos/${complexId}/mp/credenciales`, {
+    method: 'POST',
+    headers: { 'Content-Type':'application/json' },
+    body: JSON.stringify(payload)
+  });
+  alert('Credenciales MP guardadas ✔');
+}
+// === Cargar switches de notificaciones ===
+async function cargarNotificaciones() {
+  try {
+    const res = await fetch(`${backendUrl}/leer-contacto/${complejoId}`);
+    const data = await res.json();
+    document.getElementById("notifEmail").checked = !!data.notif_email;
+    document.getElementById("notifWhats").checked = !!data.notif_whats;
+  } catch (e) {
+    console.warn("No se pudieron cargar notificaciones:", e);
+  }
+}
+
+// === Guardar switches de notificaciones ===
+document.getElementById("guardarNotif").addEventListener("click", async () => {
+  const notif_email = document.getElementById("notifEmail").checked;
+  const notif_whats = document.getElementById("notifWhats").checked;
+  try {
+    await fetch(`${backendUrl}/guardar-notificaciones/${complejoId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ notif_email, notif_whats })
+    });
+    alert("Preferencias guardadas ✅");
+  } catch (e) {
+    alert("Error al guardar preferencias");
+  }
+});
+
+// Llamar cuando carga la página
+window.addEventListener("load", cargarNotificaciones);
+
+</script>
 </body>
 </html>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
