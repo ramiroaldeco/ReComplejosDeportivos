@@ -14,6 +14,11 @@ const JWT_SECRET = process.env.JWT_SECRET || 'cambialo_en_.env';
 
 // 👉 Importá el DAO así, SIN destructurar:
 const dao = require("./dao");
+console.log("DAO sanity:", {
+  listarComplejos: typeof dao.listarComplejos,
+  exportsKeys: Object.keys(dao)
+});
+
 
 // --- App & middlewares
 const app = express();
@@ -304,16 +309,14 @@ let _cacheComplejosCompat = {};
 app.get("/datos_complejos", async (_req, res) => {
   try {
     res.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
-    const d = await dao.listarComplejos();   // intenta traer desde DB
+    const d = await dao.listarComplejos();   // BD
     _cacheComplejosCompat = d;
-    res.json(d); // ✅ directo desde DB
+    res.json(d);                             // << SOLO objeto
   } catch (e) {
     console.error("DB /datos_complejos", e);
-    res.json(leerJSON(pathDatos)); // fallback al archivo solo si falla
+    res.json(leerJSON(pathDatos));           // fallback
   }
 });
-
-
 // Guardar datos mergeados (onboarding)
 app.post("/guardarDatos", async (req, res) => {
   try {
@@ -1044,7 +1047,14 @@ app.get('/complejos/:id/mp/credenciales', async (req, res) => {
     res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
-
+app.get("/__health_db", async (_req,res)=>{
+  try {
+    const d = await dao.listarComplejos();
+    res.json({ ok:true, via:"db", count:Object.keys(d||{}).length });
+  } catch (e) {
+    res.status(500).json({ ok:false, error:String(e) });
+  }
+});
 // =======================
 // Arranque
 // =======================
