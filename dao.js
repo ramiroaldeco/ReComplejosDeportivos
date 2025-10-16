@@ -188,6 +188,7 @@ async function loginDueno(complejoId, password) {
   const guardada = String(rows[0].clave_legacy || "").trim();
   return { ok: guardada !== "" && guardada === pass };
 }
+
 /* ===================== RESERVAS (compat objeto) ===================== */
 
 // reservations → objeto clave legacy (usamos SLUG de cancha para que coincida con el front)
@@ -330,30 +331,8 @@ async function actualizarReservaTrasPago({ preference_id, payment_id, status, no
   return rowCount > 0;
 }
 
-module.exports = {
-  // === Complejos y datos base ===
-  listarComplejos,
-  guardarDatosComplejos,
-  loginDueno,
+/* ===================== MP OAuth en DB ===================== */
 
-  // === Reservas ===
-  listarReservasObjCompat,
-  guardarReservasObjCompat,
-  crearHold,
-  actualizarReservaTrasPago,
-
-  // === MP OAuth ===
-  upsertMpOAuth,
-  getMpOAuth,
-
-  // === Contacto y notificaciones ===
-  leerContactoComplejo,
-  guardarContactoComplejo,
-  guardarNotificaciones,
-  guardarCredencialesMP,
-  leerCredencialesMP
-};
-// ==== MP OAuth en DB ====
 async function upsertMpOAuth({ complex_id, access_token, refresh_token, scope, token_type, live_mode, expires_in }) {
   await pool.query(`
     create table if not exists mp_oauth (
@@ -383,10 +362,14 @@ async function upsertMpOAuth({ complex_id, access_token, refresh_token, scope, t
 }
 
 async function getMpOAuth(complex_id) {
-  const { rows } = await pool.query(`select access_token, refresh_token from mp_oauth where complex_id = $1`, [complex_id]);
+  const { rows } = await pool.query(
+    `select access_token, refresh_token from mp_oauth where complex_id = $1`,
+    [complex_id]
+  );
   return rows[0] || null;
 }
-// ===================== DUEÑO / CONTACTO =====================
+
+/* ===================== DUEÑO / CONTACTO ===================== */
 
 // Lee contacto + switches de un complejo
 async function leerContactoComplejo(complexId) {
@@ -426,7 +409,7 @@ async function guardarNotificaciones(complexId, { notif_whats, notif_email }) {
   return rows[0];
 }
 
-// ===================== MERCADO PAGO =====================
+/* ===================== MERCADO PAGO (credenciales por complejo) ===================== */
 
 // Guarda credenciales MP por complejo (post OAuth o manual)
 async function guardarCredencialesMP(complexId, creds) {
@@ -462,12 +445,28 @@ async function leerCredencialesMP(complexId) {
   return rows[0] || null;
 }
 
+/* ===================== EXPORTS ÚNICOS ===================== */
+
 module.exports = {
-  // ...lo que ya exportabas
+  // === Complejos y datos base ===
+  listarComplejos,
+  guardarDatosComplejos,
+  loginDueno,
+
+  // === Reservas ===
+  listarReservasObjCompat,
+  guardarReservasObjCompat,
+  crearHold,
+  actualizarReservaTrasPago,
+
+  // === MP OAuth ===
+  upsertMpOAuth,
+  getMpOAuth,
+
+  // === Contacto y notificaciones ===
   leerContactoComplejo,
   guardarContactoComplejo,
   guardarNotificaciones,
   guardarCredencialesMP,
   leerCredencialesMP
 };
-
