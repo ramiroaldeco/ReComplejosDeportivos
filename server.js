@@ -704,21 +704,19 @@ app.post("/webhook-mp", async (req, res) => {
     if (!clave) return;
 
     // actualizar BD (si está disponible)
-    let updated = false;
     try {
-      const u = await dao.actualizarReservaTrasPago({
+      await dao.actualizarReservaTrasPago({
         preference_id: prefId,
         payment_id: pago?.id,
         status,
         nombre: pago?.metadata?.nombre || null,
         telefono: pago?.metadata?.telefono || null
       });
-      updated = !!u;
     } catch (e) {
       console.error("DB actualizar tras pago:", e);
     }
 
-    // mantener compat en archivo
+    // mantener compat en archivo local
     const reservas = leerJSON(pathReservas);
     const r = reservas[clave] || {};
     r.preference_id = prefId || r.preference_id;
@@ -727,12 +725,13 @@ app.post("/webhook-mp", async (req, res) => {
     if (status === "approved") {
       r.status = "approved";
       r.paidAt = Date.now();
-      r.nombre = r.nombre || "";
-      r.telefono = r.telefono || "";
+      r.nombre = r.nombre || pago?.metadata?.nombre || "";
+      r.telefono = r.telefono || pago?.metadata?.telefono || "";
       r.complejoId = r.complejoId || complejoId || "";
 
       escribirJSON(pathReservas, { ...reservas, [clave]: r });
-      // notificaciones (opcionales)
+
+      // 🔔 Enviar email al dueño
       const infoNoti = {
         clave,
         complejoId: r.complejoId,
@@ -740,7 +739,8 @@ app.post("/webhook-mp", async (req, res) => {
         telefono: r.telefono,
         monto: r.monto || r.precio || r.senia || ""
       };
-      notificarAprobado(infoNoti).catch(()=>{});
+      await notificarAprobado(infoNoti);
+
       delete r.holdUntil;
 
     } else if (status === "rejected" || status === "cancelled") {
@@ -923,6 +923,58 @@ function plantillaMailReserva({ complejoId, cancha, fecha, hora, nombre, telefon
     </div>`;
   return { subject: titulo, html };
 }
+// =======================
+// Notificaciones (solo Email con Gmail)
+// =======================
+// ====== Email (Gmail) ======
+// lee contacto y switches priorizando DB; fallback al cache o JSON
+async function getOwnerConfig(complejoId) {
+  try {
+    if (dao?.leerContactoComplejo) {
+      const r = await dao.leerContactoComplejo(complejoId);
+      if (r) {
+        return {
+          owner_email: r.owner_email || "",
+          owner_phone: r.owner_phone || "",
+          notif_email: !!r.notif_email,
+          notif_whats: !!r.notif_whats,
+        };
+      }
+    }
+  } catch (e) {
+    console.warn("getOwnerConfig DB", e?.message || e);
+  }
+  // fallback (cache/archivo) por compat
+  const datos = Object.keys(_cacheComplejosCompat||{}).length ? _cacheComplejosCompat : leerJSON(pathDatos);
+  const conf = datos?.[complejoId] || {};
+  const notif = conf.notif || {};
+  return {
+    owner_email: conf.emailDueño || "",
+    owner_phone: conf.whatsappDueño || "",
+    notif_email: !!notif.email,
+    notif_whats: !!notif.whats
+  };
+}
+
+function plantillaMailReserva({ complejoId, cancha, fecha, hora, nombre, telefono, monto }) {
+  const telFmt = telefono ? (String(telefono).startsWith('+') ? telefono : `+${String(telefono).replace(/\D/g,'')}`) : 's/d';
+  const montoFmt = (monto!=null && monto!=="") ? `ARS $${Number(monto).toLocaleString('es-AR')}` : '—';
+  const titulo = `NUEVA RESERVA – ${cancha || ''} ${hora || ''}`.trim();
+
+  const html = `
+    <div style="font-family:system-ui,Segoe UI,Arial,sans-serif;line-height:1.45">
+      <h2 style="margin:0 0 10px">NUEVA RESERVA</h2>
+      <p><b>Complejo:</b> ${complejoId}</p>
+      <p><b>Cancha:</b> ${cancha || 's/d'}</p>
+      <p><b>Fecha:</b> ${fecha || 's/d'} <b>Hora:</b> ${hora || 's/d'}</p>
+      <p><b>Cliente:</b> ${nombre || '—'}</p>
+      <p><b>Teléfono:</b> ${telFmt}</p>
+      <p><b>Seña:</b> ${montoFmt}</p>
+      <hr style="border:none;height:1px;background:#ddd;margin:12px 0" />
+      <small style="color:#666">Recomplejos</small>
+    </div>`;
+  return { subject: titulo, html };
+}
 
 async function enviarEmail(complejoId, subject, html) {
   try {
@@ -940,32 +992,9 @@ async function enviarEmail(complejoId, subject, html) {
     console.error("[EMAIL] error:", e?.message || e);
   }
 }
-
-// =======================
-// Notificaciones (solo Email con Gmail)
-// =======================
-
-async function enviarEmail(complejoId, asunto, html) {
-  try {
-    const datos = Object.keys(_cacheComplejosCompat||{}).length ? _cacheComplejosCompat : leerJSON(pathDatos);
-    const para = (datos?.[complejoId]?.emailDueño) || process.env.ADMIN_EMAIL;
-    if (!para) return;
-
-    const transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: { user: process.env.GMAIL_USER, pass: process.env.GOOGLE_APP_PASSWORD },
-    });
-
-    await transporter.sendMail({ from: process.env.GMAIL_USER, to: para, subject: asunto, html });
-    console.log("[EMAIL] enviado a", para);
-  } catch (e) {
-    console.error("[EMAIL] error:", e?.message || e);
-  }
-}
-
 async function notificarAprobado({ clave, complejoId, nombre, telefono, monto }) {
   try {
-    const info = parseClaveServidor(clave) || {};
+    const info = typeof parseClaveServidor === "function" ? (parseClaveServidor(clave) || {}) : {};
     const { subject, html } = plantillaMailReserva({
       complejoId,
       cancha: info.cancha,
@@ -980,13 +1009,24 @@ async function notificarAprobado({ clave, complejoId, nombre, telefono, monto })
     console.error("notificarAprobado error:", e?.message || e);
   }
 }
-
-
 // Endpoint de prueba (GET para abrirlo en el navegador)
 app.get("/__test-email", async (req, res) => {
   try {
-    await enviarEmail("elbosque", "Prueba Recomplejos", "<p>Hola Diego 👋, esto es una prueba de correo.</p>");
-    res.json({ ok: true, msg: "Email de prueba enviado." });
+    const complejoId = String(req.query.complejoId || "").trim();
+    if (!complejoId) return res.status(400).json({ ok:false, error:"Falta ?complejoId=" });
+
+    const { subject, html } = plantillaMailReserva({
+      complejoId,
+      cancha: "Prueba",
+      fecha: new Date().toISOString().slice(0,10),
+      hora: "20:00",
+      nombre: "Tester",
+      telefono: "",
+      monto: 1234
+    });
+
+    await enviarEmail(complejoId, subject, html);
+    res.json({ ok: true, msg: `Email de prueba enviado para complejo ${complejoId}.` });
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: e.message });
