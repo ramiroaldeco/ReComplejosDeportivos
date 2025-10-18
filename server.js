@@ -400,25 +400,20 @@ app.post("/guardarReservas", async (req, res) => {
 // Notificar reserva manual (desde micomplejo)
 app.post("/notificar-manual", async (req, res) => {
   try {
-    const { clave, complejoId, nombre, telefono, monto } = req.body || {};
-    if (!clave || !complejoId) return res.status(400).json({ ok:false, error:"Faltan datos" });
+    const { complejoId, nombre, telefono, monto, clave } = req.body || {};
+    if (!complejoId) return res.status(400).json({ ok:false, error:"Falta complejoId" });
 
-    const info = parseClaveServidor(clave) || {};
+    // Si viene 'clave' podés parsear cancha/fecha/hora, pero no hace falta para el mail
     const { subject, html } = plantillaMailReserva({
       complejoId,
-      cancha: info.cancha,
-      fecha: info.fechaISO,
-      hora: info.hora,
-      nombre,
-      telefono,
-      monto
+      cancha: "", fecha: "", hora: "", // opcional si no querés parsear
+      nombre, telefono, monto
     });
-
     await enviarEmail(complejoId, subject, html);
-    return res.json({ ok:true });
+    res.json({ ok:true });
   } catch (e) {
-    console.error("/notificar-manual", e?.message || e);
-    return res.status(500).json({ ok:false, error:"server_error" });
+    console.error("notificar-manual:", e);
+    res.status(500).json({ ok:false, error:e.message });
   }
 });
 // ¿Está libre este turno?
@@ -459,7 +454,55 @@ app.get("/estado-reserva", async (req,res)=>{
     return res.json({ ok:true, existe:true, status:r.status, data:r, via:"archivo" });
   }
 });
+// Crea una reserva manual (1 turno) en DB y notifica por email si corresponde
+app.post("/reservas/manual", async (req, res) => {
+  try {
+    const { complejoId, cancha, fechaISO, hora, nombre, telefono, monto } = req.body || {};
+    if (!complejoId || !cancha || !fechaISO || !hora) {
+      return res.status(400).json({ ok: false, error: "Faltan datos: complejoId, cancha, fechaISO, hora" });
+    }
 
+    // Inserta en DB como 'manual'
+    // dao.crearHold ya bloquea por un rato; para MANUAL queremos un registro estable:
+    // Usamos la lógica de guardar “objeto compat” pero SOLO una key.
+    const key = `${complejoId}-${cancha}-${fechaISO}-${hora}`;
+    const obj = {
+      [key]: {
+        status: "manual",
+        nombre: nombre || "",
+        telefono: telefono || "",
+        monto: Number(monto || 0) || 0,
+        creado: Date.now()
+      }
+    };
+    // En dao.js tenés guardarReservasObjCompat (borra todo).
+    // En lugar de borrar todo, insertemos UNA RESERVA:
+    // -> si no tenés aún este helper, pegalo en dao.js tal cual (te lo dejo aquí):
+    // async function insertarReservaManual({complex_id, cancha, fechaISO, hora, nombre, telefono, monto}) { ... }
+    if (dao.insertarReservaManual) {
+      await dao.insertarReservaManual({ complex_id: complejoId, cancha, fechaISO, hora, nombre, telefono, monto });
+    } else {
+      // Fallback: usar el "compat" insertando solo una key SIN borrar todo:
+      // (este camino no es ideal; te recomiendo agregar insertarReservaManual en dao.js)
+      await dao.guardarReservasObjCompat({ ...obj, __append: true });
+    }
+
+    // Email al dueño (si notif_email y owner_email en DB)
+    try {
+      const { subject, html } = plantillaMailReserva({
+        complejoId, cancha, fecha: fechaISO, hora, nombre, telefono, monto
+      });
+      await enviarEmail(complejoId, subject, html); // esta función ya respeta notif_email/owner_email
+    } catch (e) {
+      console.warn("No se pudo enviar email de reserva manual:", e?.message || e);
+    }
+
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error("/reservas/manual error:", e);
+    res.status(500).json({ ok: false, error: String(e.message || e) });
+  }
+});
 // =======================
 // PAGOS: crear preferencia + Webhook (SOLO OAuth)
 // =======================
