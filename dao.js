@@ -494,5 +494,29 @@ async function insertarReservaManual({ complex_id, cancha, fechaISO, hora, nombr
       do update set status='manual', nombre=$5, telefono=$6, monto=$7, hold_until=null
   `, [complex_id, field_id, fechaISO, hora, nombre || null, telefono || null, monto || null]);
 }
+// Inserta o actualiza una reserva 'manual' (1 turno) en la BD
+async function insertarReservaManual({ complex_id, cancha, fechaISO, hora, nombre, telefono, monto }) {
+  // buscar field_id por nombre flexible (igual que otras queries)
+  const fieldQ = `
+    select id from fields
+    where complex_id=$1 and (
+      name=$2
+      or lower(regexp_replace(name,'\\s+','','g')) = lower(regexp_replace($2,'\\s+','','g'))
+      or ($2 ~ '^[0-9]+$' and jugadores = ($2)::int)
+    )
+    limit 1
+  `;
+  const f = await pool.query(fieldQ, [complex_id, cancha]);
+  if (!f.rowCount) throw new Error("Cancha no encontrada");
+  const field_id = f.rows[0].id;
+
+  // upsert por (complex_id, field_id, fecha, hora)
+  await pool.query(`
+    insert into reservations (complex_id, field_id, fecha, hora, status, nombre, telefono, monto)
+    values ($1,$2,$3,$4,'manual',$5,$6,$7)
+    on conflict (complex_id, field_id, fecha, hora)
+      do update set status='manual', nombre=$5, telefono=$6, monto=$7, hold_until=null
+  `, [complex_id, field_id, fechaISO, hora, nombre || null, telefono || null, monto || null]);
+}
 
 module.exports.insertarReservaManual = insertarReservaManual;
