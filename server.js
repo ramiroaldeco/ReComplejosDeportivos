@@ -261,8 +261,10 @@ setInterval(limpiarHoldsVencidos, 60 * 1000); // cada minuto
 function slugCancha(nombre = "") {
   return String(nombre)
     .toLowerCase()
-    .replace(/\s+/g, "")
-    .replace(/[^a-z0-9]/g, "");
+    .normalize('NFD')                     // separa letras y tildes
+    .replace(/[\u0300-\u036f]/g, '')      // elimina las tildes/acentos
+    .replace(/\s+/g, '')                  // borra espacios
+    .replace(/[^a-z0-9]/g, '');           // borra todo lo que no sea letra o número
 }
 
 /**
@@ -649,23 +651,34 @@ app.post("/reservas/manual", async (req, res) => {
       };
       await dao.guardarReservasObjCompat(obj);
     }
+// Email al dueño (si notif_email y owner_email en DB)
+try {
+  // recuperar nombre legible desde la caché de datos
+  let canchaLegible = cancha;
+  try {
+    const info = _cacheComplejosCompat?.[complejoId];
+    const match = (info?.canchas || []).find(
+      c => slugCancha(c.nombre) === slugCancha(cancha)
+    );
+    if (match?.nombre) canchaLegible = match.nombre;
+  } catch (_) {}
 
-    // Email al dueño (si notif_email y owner_email en DB)
-    try {
-      const { subject, html } = plantillaMailReserva({
-        complejoId, cancha, fecha: fechaISO, hora, nombre, telefono, monto
-      });
-      await enviarEmail(complejoId, subject, html);
-    } catch (e) {
-      console.warn("No se pudo enviar email de reserva manual:", e?.message || e);
-    }
+  const { subject, html } = plantillaMailReserva({
+    complejoId,
+    cancha: canchaLegible,
+    fecha: fechaISO,
+    hora,
+    nombre,
+    telefono,
+    monto
+  });
+  await enviarEmail(complejoId, subject, html);
+} catch (e) {
+  console.warn("No se pudo enviar email de reserva manual:", e?.message || e);
+}
 
-    return res.json({ ok: true });
-  } catch (e) {
-    console.error("/reservas/manual error:", e);
-    res.status(500).json({ ok: false, error: String(e.message || e) });
-  }
-});
+return res.json({ ok: true });
+
 
 // Notificar reserva manual (solo email, no guarda estado)
 app.post("/notificar-manual", async (req, res) => {
