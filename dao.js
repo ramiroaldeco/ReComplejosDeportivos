@@ -1,40 +1,28 @@
-// dao.js — versión alineada con server.js y front (claves/slug unificado)
+// dao.js — versión saneada (exports unificados + fix ON CONFLICT + sin duplicados)
 const pool = require('./db');
-const bcrypt = require('bcrypt'); // por si luego migrás login a hash
+// const bcrypt = require('bcrypt'); // si después migrás login a hash, descomentá
 
 /* ===================== Helpers ===================== */
 
 function slugCancha(nombre = "") {
-  return String(nombre)
-    .toLowerCase()
-    .replace(/\s+/g, "")
-    .replace(/[^a-z0-9]/g, "");
+  return String(nombre).toLowerCase().replace(/\s+/g, "").replace(/[^a-z0-9]/g, "");
 }
-function hhmm(x) {
-  // pg suele devolver 'HH:MM:SS' como string
-  return String(x || "").slice(0, 5);
-}
+function hhmm(x) { return String(x || "").slice(0, 5); }
 function ymd(d) {
-  // fecha PG → 'YYYY-MM-DD'
-  try {
-    return (d instanceof Date ? d : new Date(d)).toISOString().slice(0, 10);
-  } catch {
-    return String(d || "").slice(0, 10);
-  }
+  try { return (d instanceof Date ? d : new Date(d)).toISOString().slice(0, 10); }
+  catch { return String(d || "").slice(0, 10); }
 }
 
 /* ===================== COMPLEJOS ===================== */
 
 // Devuelve objeto { [id]: {nombre, ciudad, maps, servicios, imagenes, horarios, canchas} }
 async function listarComplejos() {
-  // complejos
   const { rows: cx } = await pool.query(
     `select id, name, city, maps_iframe, servicios, imagenes, clave_legacy
        from complexes
        order by name`
   );
 
-  // canchas + horarios
   const { rows: fields } = await pool.query(
     `select id, complex_id, name, jugadores, precio_pp, senia
        from fields
@@ -46,7 +34,6 @@ async function listarComplejos() {
        order by complex_id, day_of_week`
   );
 
-  // salida compatible con tu front
   const out = {};
   for (const c of cx) {
     out[c.id] = {
@@ -54,16 +41,14 @@ async function listarComplejos() {
       nombre: c.name,
       ciudad: c.city,
       maps: c.maps_iframe,
-      servicios: Array.isArray(c.servicios) ? c.servicios : (c.servicios ? c.servicios : []),
-      imagenes: Array.isArray(c.imagenes)  ? c.imagenes  : (c.imagenes  ? c.imagenes  : []),
+      servicios: Array.isArray(c.servicios) ? c.servicios : (c.servicios ?? []),
+      imagenes: Array.isArray(c.imagenes) ? c.imagenes : (c.imagenes ?? []),
       canchas: [],
       horarios: {}
     };
   }
 
-  // map día 0..6 -> nombre (0=Domingo en la DB)
   const dowNames = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
-
   for (const s of sched) {
     const dia = dowNames[s.day_of_week] || "Lunes";
     if (out[s.complex_id]) {
@@ -82,10 +67,9 @@ async function listarComplejos() {
     out[f.complex_id].canchas.push({
       nombre: f.name,
       jugadores,
-      // tres variantes para compatibilidad
-      precioPP,                                      // por jugador
-      precioPorJugador: precioPP,                    // alias que usa a veces tu front
-      precioTotal: (precioPP * jugadores) || 0,      // total calculado
+      precioPP,
+      precioPorJugador: precioPP,
+      precioTotal: (precioPP * jugadores) || 0,
       senia
     });
   }
@@ -119,12 +103,13 @@ async function guardarDatosComplejos(merged) {
         d.nombre || id,
         d.ciudad || null,
         d.maps || d.maps_iframe || null,
-        JSON.stringify(d.servicios || []),
-        JSON.stringify(d.imagenes || []),
+        // si columnas son jsonb, pasar arrays/objetos directo es válido con pg
+        d.servicios || [],
+        d.imagenes || [],
         d.clave || null
       ]);
 
-      // schedules (replace)
+      // schedules (replace 7 días)
       if (d.horarios && typeof d.horarios === 'object') {
         await client.query(`delete from schedules where complex_id=$1`, [id]);
         const orden = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"];
@@ -146,13 +131,10 @@ async function guardarDatosComplejos(merged) {
         await client.query(`delete from fields where complex_id=$1`, [id]);
         for (const c of d.canchas) {
           const jug = Number(c.jugadores ?? 0);
-
-          // origen posible: precioPP | precioPorJugador | precioTotal
           const precioPP =
             c.precioPP != null ? Number(c.precioPP) :
             c.precioPorJugador != null ? Number(c.precioPorJugador) :
             (c.precioTotal != null && jug) ? Number(c.precioTotal) / jug : 0;
-
           const senia = Number(c.senia ?? 0);
 
           await client.query(
@@ -193,12 +175,11 @@ async function loginDueno(complejoId, password) {
 
 // reservations → objeto clave legacy (usamos SLUG de cancha para que coincida con el front)
 async function listarReservasObjCompat() {
-  const q = `
+  const { rows } = await pool.query(`
     select r.*, f.name as cancha
       from reservations r
       join fields f on f.id = r.field_id
-  `;
-  const { rows } = await pool.query(q);
+  `);
   const out = {};
   for (const r of rows) {
     const fechaISO = ymd(r.fecha);
@@ -208,9 +189,9 @@ async function listarReservasObjCompat() {
       status: r.status,
       nombre: r.nombre || "",
       telefono: r.telefono || "",
-      monto: r.monto || undefined,
-      preference_id: r.preference_id || undefined,
-      payment_id: r.payment_id || undefined
+      monto: r.monto ?? undefined,
+      preference_id: r.preference_id ?? undefined,
+      payment_id: r.payment_id ?? undefined
     };
     if (r.status === 'blocked') item.bloqueado = true;
     if (r.hold_until) {
@@ -222,26 +203,24 @@ async function listarReservasObjCompat() {
   return out;
 }
 
-// Guarda el objeto completo (primera versión: borra y recrea)
+// ⚠️ Borra TODO y recrea desde el objeto (útil para import masivo; peligroso si hay varios complejos)
 async function guardarReservasObjCompat(obj) {
   const client = await pool.connect();
   try {
     await client.query('begin');
     await client.query('delete from reservations');
 
-    // query flexible para encontrar cancha
-    const fieldQ = `
-      select id from fields
-      where complex_id=$1 and (
-        name=$2
-        or lower(regexp_replace(name,'\\s+','','g')) = lower(regexp_replace($2,'\\s+','','g'))
-        or ($2 ~ '^[0-9]+$' and jugadores = ($2)::int)
-      )
-      limit 1
-    `;
+  const fieldQ = `
+  select id from fields
+  where complex_id=$1 and (
+    unaccent(lower(regexp_replace(name,'\\s+','','g'))) = unaccent(lower(regexp_replace($2,'\\s+','','g')))
+    or ($2 ~ '^[0-9]+$' and jugadores = ($2)::int)
+  )
+  limit 1
+`;
+
 
     for (const key of Object.keys(obj || {})) {
-      // key: complexId-slugCancha-YYYY-MM-DD-HH:mm  (o variantes compatibles)
       const parts = key.split('-');
       if (parts.length < 4) continue;
       const complex_id = parts[0];
@@ -255,13 +234,11 @@ async function guardarReservasObjCompat(obj) {
 
       const r = obj[key];
 
-      // buscar por nombre original o por "slug"
-      // (si la key es slug, este where ya contempla la comparación sin espacios)
       const f = await client.query(fieldQ, [complex_id, canchaKey]);
       if (!f.rowCount) continue;
       const field_id = f.rows[0].id;
 
-      let status = r.status || (r.bloqueado ? 'blocked' : 'manual');
+      const status = r.status || (r.bloqueado ? 'blocked' : 'manual');
 
       await client.query(`
         insert into reservations (complex_id, field_id, fecha, hora, status, nombre, telefono, monto, preference_id, payment_id, hold_until)
@@ -287,25 +264,23 @@ async function guardarReservasObjCompat(obj) {
 /* ===================== UTIL: HOLD / PAGO ===================== */
 
 async function crearHold({ complex_id, cancha, fechaISO, hora, nombre, telefono, monto, holdMinutes=10 }) {
-  // búsqueda flexible por cancha
   const fieldQ = `
-    select id from fields
-    where complex_id=$1 and (
-      name=$2
-      or lower(regexp_replace(name,'\\s+','','g')) = lower(regexp_replace($2,'\\s+','','g'))
-      or ($2 ~ '^[0-9]+$' and jugadores = ($2)::int)
-    )
-    limit 1
-  `;
+  select id from fields
+  where complex_id=$1 and (
+    unaccent(lower(regexp_replace(name,'\\s+','','g'))) = unaccent(lower(regexp_replace($2,'\\s+','','g')))
+    or ($2 ~ '^[0-9]+$' and jugadores = ($2)::int)
+  )
+  limit 1
+`;
   const { rows } = await pool.query(fieldQ, [complex_id, cancha]);
   if (!rows.length) return false;
   const field_id = rows[0].id;
 
+  // ✅ ON CONFLICT correcto (apoya en el índice único (complex_id, field_id, fecha, hora))
   const ins = await pool.query(`
     insert into reservations (complex_id, field_id, fecha, hora, status, nombre, telefono, monto, hold_until)
     values ($1,$2,$3,$4,'hold',$5,$6,$7, now() + ($8 || ' minutes')::interval)
     on conflict (complex_id,field_id,fecha,hora)
-      where status in ('hold','pending','approved','manual','blocked')
       do nothing
     returning id
   `, [complex_id, field_id, fechaISO, hora, nombre || null, telefono || null, monto || null, holdMinutes]);
@@ -371,7 +346,6 @@ async function getMpOAuth(complex_id) {
 
 /* ===================== DUEÑO / CONTACTO ===================== */
 
-// Lee contacto + switches de un complejo
 async function leerContactoComplejo(complexId) {
   const { rows } = await pool.query(
     `SELECT owner_phone, owner_email, notif_whats, notif_email
@@ -381,7 +355,6 @@ async function leerContactoComplejo(complexId) {
   return rows[0] || null;
 }
 
-// Guarda contacto (tel + email) y, si vienen, switches
 async function guardarContactoComplejo(complexId, { owner_phone, owner_email, notif_whats, notif_email }) {
   const { rows } = await pool.query(
     `UPDATE complexes
@@ -396,7 +369,6 @@ async function guardarContactoComplejo(complexId, { owner_phone, owner_email, no
   return rows[0];
 }
 
-// Cambia SOLO switches de notificación
 async function guardarNotificaciones(complexId, { notif_whats, notif_email }) {
   const { rows } = await pool.query(
     `UPDATE complexes
@@ -411,7 +383,6 @@ async function guardarNotificaciones(complexId, { notif_whats, notif_email }) {
 
 /* ===================== MERCADO PAGO (credenciales por complejo) ===================== */
 
-// Guarda credenciales MP por complejo (post OAuth o manual)
 async function guardarCredencialesMP(complexId, creds) {
   const {
     mp_user_id,
@@ -435,7 +406,6 @@ async function guardarCredencialesMP(complexId, creds) {
   return rows[0];
 }
 
-// Lee credenciales MP por complejo (para crear preferencias, etc.)
 async function leerCredencialesMP(complexId) {
   const { rows } = await pool.query(
     `SELECT mp_user_id, mp_public_key, mp_access_token, mp_refresh_token, mp_token_expiry
@@ -443,6 +413,32 @@ async function leerCredencialesMP(complexId) {
     [complexId]
   );
   return rows[0] || null;
+}
+
+/* ===================== RESERVA MANUAL (única) ===================== */
+
+// Inserta o actualiza una reserva 'manual' (1 turno)
+async function insertarReservaManual({ complex_id, cancha, fechaISO, hora, nombre, telefono, monto }) {
+ const fieldQ = `
+  select id from fields
+  where complex_id=$1 and (
+    unaccent(lower(regexp_replace(name,'\\s+','','g'))) = unaccent(lower(regexp_replace($2,'\\s+','','g')))
+    or ($2 ~ '^[0-9]+$' and jugadores = ($2)::int)
+  )
+  limit 1
+`;
+  const f = await pool.query(fieldQ, [complex_id, cancha]);
+  if (!f.rowCount) throw new Error("Cancha no encontrada");
+  const field_id = f.rows[0].id;
+
+  await pool.query(`
+    insert into reservations (complex_id, field_id, fecha, hora, status, nombre, telefono, monto)
+    values ($1,$2,$3,$4,'manual',$5,$6,$7)
+    on conflict (complex_id, field_id, fecha, hora)
+      do update set status='manual', nombre=$5, telefono=$6, monto=$7, hold_until=null
+  `, [complex_id, field_id, fechaISO, hora, nombre || null, telefono || null, monto || null]);
+
+  return { ok: true };
 }
 
 /* ===================== EXPORTS ÚNICOS ===================== */
@@ -458,6 +454,9 @@ module.exports = {
   guardarReservasObjCompat,
   crearHold,
   actualizarReservaTrasPago,
+  insertarReservaManual,      // <- la que usás desde el server
+  // alias opcional si en algún lado la llamaste distinto:
+  reservarManualDB: insertarReservaManual,
 
   // === MP OAuth ===
   upsertMpOAuth,
@@ -470,53 +469,3 @@ module.exports = {
   guardarCredencialesMP,
   leerCredencialesMP
 };
-// Inserta una reserva 'manual' para una cancha/fecha/hora concreta
-async function insertarReservaManual({ complex_id, cancha, fechaISO, hora, nombre, telefono, monto }) {
-  // buscar field_id por nombre flexible (como en tus queries)
-  const fieldQ = `
-    select id from fields
-    where complex_id=$1 and (
-      name=$2
-      or lower(regexp_replace(name,'\\s+','','g')) = lower(regexp_replace($2,'\\s+','','g'))
-      or ($2 ~ '^[0-9]+$' and jugadores = ($2)::int)
-    )
-    limit 1
-  `;
-  const f = await pool.query(fieldQ, [complex_id, cancha]);
-  if (!f.rowCount) throw new Error("Cancha no encontrada");
-  const field_id = f.rows[0].id;
-
-  // upsert por (complex_id, field_id, fecha, hora)
-  await pool.query(`
-    insert into reservations (complex_id, field_id, fecha, hora, status, nombre, telefono, monto)
-    values ($1, $2, $3, $4, 'manual', $5, $6, $7)
-    on conflict (complex_id, field_id, fecha, hora)
-      do update set status='manual', nombre=$5, telefono=$6, monto=$7, hold_until=null
-  `, [complex_id, field_id, fechaISO, hora, nombre || null, telefono || null, monto || null]);
-}
-// Inserta o actualiza una reserva 'manual' (1 turno) en la BD
-async function insertarReservaManual({ complex_id, cancha, fechaISO, hora, nombre, telefono, monto }) {
-  // buscar field_id por nombre flexible (igual que otras queries)
-  const fieldQ = `
-    select id from fields
-    where complex_id=$1 and (
-      name=$2
-      or lower(regexp_replace(name,'\\s+','','g')) = lower(regexp_replace($2,'\\s+','','g'))
-      or ($2 ~ '^[0-9]+$' and jugadores = ($2)::int)
-    )
-    limit 1
-  `;
-  const f = await pool.query(fieldQ, [complex_id, cancha]);
-  if (!f.rowCount) throw new Error("Cancha no encontrada");
-  const field_id = f.rows[0].id;
-
-  // upsert por (complex_id, field_id, fecha, hora)
-  await pool.query(`
-    insert into reservations (complex_id, field_id, fecha, hora, status, nombre, telefono, monto)
-    values ($1,$2,$3,$4,'manual',$5,$6,$7)
-    on conflict (complex_id, field_id, fecha, hora)
-      do update set status='manual', nombre=$5, telefono=$6, monto=$7, hold_until=null
-  `, [complex_id, field_id, fechaISO, hora, nombre || null, telefono || null, monto || null]);
-}
-
-module.exports.insertarReservaManual = insertarReservaManual;
