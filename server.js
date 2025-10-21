@@ -6,11 +6,11 @@ const fs = require("fs");
 const path = require("path");
 const fetch = require("node-fetch"); // v2
 const { MercadoPagoConfig, Preference } = require("mercadopago");
+const nodemailer = require("nodemailer");
 
-// >>> JWT ADD (arriba, junto a los require)
+// >>> JWT ADD
 const jwt = require('jsonwebtoken');
 const JWT_SECRET = process.env.JWT_SECRET || 'cambialo_en_.env';
-
 
 // 👉 Importá el DAO así, SIN destructurar:
 const dao = require("./dao");
@@ -19,14 +19,13 @@ console.log("DAO sanity:", {
   exportsKeys: Object.keys(dao)
 });
 
-
 // --- App & middlewares
 const app = express();
 const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// >>> JWT ADD – middleware de auth (no pisa nada)
+// >>> JWT ADD – middleware de auth
 function auth(req, res, next) {
   const h = req.headers.authorization || '';
   const m = h.match(/^Bearer (.+)$/);
@@ -52,12 +51,6 @@ function leerJSON(p) {
 }
 function escribirJSON(p, obj) {
   fs.writeFileSync(p, JSON.stringify(obj, null, 2));
-}
-function parseClaveServidor(k){
-  // formato nuevo: complejo-cancha-YYYY-MM-DD-HH:MM
-  const m = k.match(/^(.+?)-(.+?)-(\d{4}-\d{2}-\d{2})-(\d{2}:\d{2})$/);
-  if(!m) return null;
-  return { complejo: m[1], cancha: m[2], fechaISO: m[3], hora: m[4] };
 }
 
 // asegurar archivos de backup
@@ -238,8 +231,11 @@ async function refreshTokenMP(complejoId) {
 const HOLD_MIN = parseInt(process.env.HOLD_MIN || "10", 10); // 10 min default
 
 function estaHoldActiva(r) {
-  return r && r.status === "hold" && r.holdUntil && Date.now() < r.holdUntil;
+  if (!r) return false;
+  const t = typeof r.holdUntil === "number" ? r.holdUntil : Number(r.holdUntil);
+  return r.status === "hold" && t && Date.now() < t;
 }
+
 function limpiarHoldsVencidos() {
   const reservas = leerJSON(pathReservas);
   let cambio = false;
@@ -255,51 +251,169 @@ function limpiarHoldsVencidos() {
 setInterval(limpiarHoldsVencidos, 60 * 1000); // cada minuto
 
 // =======================
-// Helpers fecha/hora/clave
+// Helpers fecha/hora/clave UNIFICADOS
 // =======================
-function slugCancha(nombre=""){
-  return String(nombre).toLowerCase().replace(/\s+/g,"").replace(/[^a-z0-9]/g,"");
+
+/**
+ * Genera slug normalizado de nombre de cancha
+ * (minúsculas, sin espacios, solo alfanuméricos)
+ */
+function slugCancha(nombre = "") {
+  return String(nombre)
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[^a-z0-9]/g, "");
 }
-function esFechaISO(d){ return /^\d{4}-\d{2}-\d{2}$/.test(d); }
-function esHora(h){ return /^\d{2}:\d{2}$/.test(h); }
-function nombreDia(fechaISO){
+
+/**
+ * Genera la clave unificada: complejo-cancha-fecha-hora
+ * IMPORTANTE: usa slugCancha() para normalizar el nombre de la cancha
+ */
+function claveDe({ complejoId, canchaNombre, fecha, hora }) {
+  return `${complejoId}-${slugCancha(canchaNombre)}-${fecha}-${hora}`;
+}
+
+/**
+ * Parser de clave del servidor para extraer componentes
+ * formato: complejo-cancha-YYYY-MM-DD-HH:MM
+ */
+function parseClaveServidor(k) {
+  const m = k.match(/^(.+?)-(.+?)-(\d{4}-\d{2}-\d{2})-(\d{2}:\d{2})$/);
+  if (!m) return null;
+  return { complejo: m[1], cancha: m[2], fechaISO: m[3], hora: m[4] };
+}
+
+function esFechaISO(d) { return /^\d{4}-\d{2}-\d{2}$/.test(d); }
+function esHora(h) { return /^\d{2}:\d{2}$/.test(h); }
+
+function nombreDia(fechaISO) {
   const d = new Date(`${fechaISO}T00:00:00-03:00`);
-  const dias = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
+  const dias = ["Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"];
   return dias[d.getDay()];
 }
-function entre(hora, desde, hasta){
-  if(!desde || !hasta) return false;
+
+function entre(hora, desde, hasta) {
+  if (!desde || !hasta) return false;
   return (desde <= hasta) ? (hora >= desde && hora <= hasta)
-                          : (hora >= desde || hora <= hasta);
+    : (hora >= desde || hora <= hasta);
 }
-function validarTurno({complejoId, canchaNombre, fecha, hora}){
-  const datos = _cacheComplejosCompat; // cache poblado en /datos_complejos
+
+function validarTurno({ complejoId, canchaNombre, fecha, hora }) {
+  if (!complejoId) return { ok: false, error: "Falta complejoId" };
+  if (!canchaNombre) return { ok: false, error: "Falta cancha" };
+  if (!esFechaISO(fecha)) return { ok: false, error: "Fecha inválida" };
+  if (!esHora(hora)) return { ok: false, error: "Hora inválida" };
+
+  const datos = _cacheComplejosCompat;
   const info = datos?.[complejoId];
-  if(!info) return {ok:false, error:"Complejo inexistente"};
+  if (!info) return { ok: false, error: "Complejo inexistente" };
 
   const cancha = (info.canchas || []).find(c => slugCancha(c.nombre) === slugCancha(canchaNombre));
-  if(!cancha) return {ok:false, error:"Cancha inexistente"};
-
-  if(!esFechaISO(fecha) || !esHora(hora)) return {ok:false, error:"Fecha u hora inválida"};
+  if (!cancha) return { ok: false, error: "Cancha inexistente" };
 
   const ahora = new Date();
   const turno = new Date(`${fecha}T${hora}:00-03:00`);
-  if (turno.getTime() < ahora.getTime()) return {ok:false, error:"Turno en el pasado"};
+  if (turno.getTime() < ahora.getTime()) return { ok: false, error: "Turno en el pasado" };
 
   const nomDia = nombreDia(fecha);
   const hDia = (info.horarios || {})[nomDia] || {};
   const desde = hDia.desde || "18:00";
   const hasta = hDia.hasta || "23:00";
-  if(!entre(hora, desde, hasta)) return {ok:false, error:`Fuera de horario (${nomDia} ${desde}-${hasta})`};
+  if (!entre(hora, desde, hasta)) return { ok: false, error: `Fuera de horario (${nomDia} ${desde}-${hasta})` };
 
-  return {ok:true, cancha};
-}
-function claveDe({complejoId, canchaNombre, fecha, hora}){
-  return `${complejoId}-${slugCancha(canchaNombre)}-${fecha}-${hora}`;
+  return { ok: true, cancha };
 }
 
 // =======================
-// RUTAS EXISTENTES (con BD) + NUEVAS
+// Email helpers
+// =======================
+
+// lee contacto y switches priorizando DB; fallback al cache o JSON
+async function getOwnerConfig(complejoId) {
+  try {
+    if (dao?.leerContactoComplejo) {
+      const r = await dao.leerContactoComplejo(complejoId);
+      if (r) {
+        return {
+          owner_email: r.owner_email || "",
+          owner_phone: r.owner_phone || "",
+          notif_email: !!r.notif_email,
+          notif_whats: !!r.notif_whats,
+        };
+      }
+    }
+  } catch (e) {
+    console.warn("getOwnerConfig DB", e?.message || e);
+  }
+  // fallback al cache/archivo (compat)
+  const datos = Object.keys(_cacheComplejosCompat || {}).length ? _cacheComplejosCompat : leerJSON(pathDatos);
+  const conf = datos?.[complejoId] || {};
+  const notif = conf.notif || {};
+  return {
+    owner_email: conf.emailDueño || "",
+    owner_phone: conf.whatsappDueño || "",
+    notif_email: !!notif.email,
+    notif_whats: !!notif.whats
+  };
+}
+
+function plantillaMailReserva({ complejoId, cancha, fecha, hora, nombre, telefono, monto }) {
+  const telFmt = telefono ? (String(telefono).startsWith('+') ? telefono : `+${String(telefono).replace(/\D/g, '')}`) : 's/d';
+  const montoFmt = (monto != null && monto !== "") ? `ARS $${Number(monto).toLocaleString('es-AR')}` : '—';
+  const titulo = `NUEVA RESERVA — ${cancha || ''} ${hora || ''}`.trim();
+
+  const html = `
+    <div style="font-family:system-ui,Segoe UI,Arial,sans-serif;line-height:1.45">
+      <h2 style="margin:0 0 10px">NUEVA RESERVA</h2>
+      <p><b>Complejo:</b> ${complejoId}</p>
+      <p><b>Cancha:</b> ${cancha || 's/d'}</p>
+      <p><b>Fecha:</b> ${fecha || 's/d'} <b>Hora:</b> ${hora || 's/d'}</p>
+      <p><b>Cliente:</b> ${nombre || '—'}</p>
+      <p><b>Teléfono:</b> ${telFmt}</p>
+      <p><b>Seña:</b> ${montoFmt}</p>
+      <hr style="border:none;height:1px;background:#ddd;margin:12px 0" />
+      <small style="color:#666">Recomplejos</small>
+    </div>`;
+  return { subject: titulo, html };
+}
+
+async function enviarEmail(complejoId, subject, html) {
+  try {
+    const { owner_email, notif_email } = await getOwnerConfig(complejoId);
+    if (!notif_email || !owner_email) return; // no activado o sin email
+
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: { user: process.env.GMAIL_USER, pass: process.env.GOOGLE_APP_PASSWORD },
+    });
+
+    await transporter.sendMail({ from: process.env.GMAIL_USER, to: owner_email, subject, html });
+    console.log("[EMAIL] enviado a", owner_email);
+  } catch (e) {
+    console.error("[EMAIL] error:", e?.message || e);
+  }
+}
+
+async function notificarAprobado({ clave, complejoId, nombre, telefono, monto }) {
+  try {
+    const info = parseClaveServidor(clave) || {};
+    const { subject, html } = plantillaMailReserva({
+      complejoId,
+      cancha: info.cancha,
+      fecha: info.fechaISO,
+      hora: info.hora,
+      nombre,
+      telefono,
+      monto
+    });
+    await enviarEmail(complejoId, subject, html);
+  } catch (e) {
+    console.error("notificarAprobado error:", e?.message || e);
+  }
+}
+
+// =======================
+// RUTAS - Cache y datos de complejos
 // =======================
 
 // Cache breve para validación
@@ -309,20 +423,21 @@ let _cacheComplejosCompat = {};
 app.get("/datos_complejos", async (_req, res) => {
   try {
     res.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
-    const d = await dao.listarComplejos();   // BD
+    const d = await dao.listarComplejos();
     _cacheComplejosCompat = d;
-    res.json(d);                             // << SOLO objeto
+    res.json(d);
   } catch (e) {
     console.error("DB /datos_complejos", e);
-    res.json(leerJSON(pathDatos));           // fallback
+    res.json(leerJSON(pathDatos)); // fallback
   }
 });
+
 // Guardar datos mergeados (onboarding)
 app.post("/guardarDatos", async (req, res) => {
   try {
     const nuevos = req.body || {};
-    await dao.guardarDatosComplejos(nuevos); // BD
-    const actuales = leerJSON(pathDatos);    // backup opcional
+    await dao.guardarDatosComplejos(nuevos);
+    const actuales = leerJSON(pathDatos);
     const merged = { ...actuales, ...nuevos };
     escribirJSON(pathDatos, merged);
     res.json({ ok: true });
@@ -332,7 +447,7 @@ app.post("/guardarDatos", async (req, res) => {
   }
 });
 
-// Alta/actualización credencial “legacy” (si hiciera falta para pruebas)
+// Alta/actualización credencial "legacy"
 app.post("/alta-credencial", (req, res) => {
   const { id, mp_access_token, access_token } = req.body || {};
   if (!id || !(mp_access_token || access_token)) {
@@ -345,10 +460,14 @@ app.post("/alta-credencial", (req, res) => {
   res.json({ ok: true });
 });
 
+// =======================
+// RUTAS - Reservas
+// =======================
+
 // Reservas → leer de BD (compat: archivo si falla)
 app.get("/reservas", async (_req, res) => {
   try {
-    const r = await dao.listarReservasObjCompat(); // BD
+    const r = await dao.listarReservasObjCompat();
     res.json(r);
   } catch (e) {
     console.error("DB /reservas", e);
@@ -356,149 +475,153 @@ app.get("/reservas", async (_req, res) => {
   }
 });
 
-// === LOGIN DUEÑO ===
-app.post("/login", async (req, res) => {
-  const id   = String(req.body?.complejo || "").trim();   // slug del complejo
-  const pass = String(req.body?.password || "").trim();   // clave del dueño
-
-  if (!id || !pass) return res.status(400).json({ error: "Faltan datos" });
-
-  let ok = false;
-
-  // 1) Chequeo en la DB
-  try {
-    const r = await dao.loginDueno(id, pass); // debe devolver { ok: true/false }
-    ok = !!r?.ok;
-  } catch (e) {
-    console.error("DB /login:", e);
-  }
-
-  // 2) Fallback a archivo (por si la DB no tenía la clave guardada aún)
-  if (!ok) {
-    try {
-      const datos = leerJSON(pathDatos);
-      const claveArchivo = String(datos?.[id]?.clave || "").trim();
-      if (claveArchivo && claveArchivo === pass) ok = true;
-    } catch {}
-  }
-
-  if (!ok) return res.status(401).json({ error: "Contraseña incorrecta" });
-  res.json({ ok: true });
-});
-
 // Guardar reservas masivo (panel dueño)
 app.post("/guardarReservas", async (req, res) => {
   try {
-    await dao.guardarReservasObjCompat(req.body || {}); // BD
-    escribirJSON(pathReservas, req.body || {});         // backup
+    await dao.guardarReservasObjCompat(req.body || {});
+    escribirJSON(pathReservas, req.body || {});
     res.json({ ok: true });
   } catch (e) {
     console.error("DB /guardarReservas", e);
     res.status(500).json({ error: "DB error al guardar" });
   }
 });
-// ===============================
-// Helpers locales (solo si no existen)
-// ===============================
-function claveDe({complejoId, canchaNombre, fecha, hora}) {
-  return `${complejoId}-${canchaNombre}-${fecha}-${hora}`;
-}
-function validarTurno({complejoId, canchaNombre, fecha, hora}) {
-  if(!complejoId) return { ok:false, error:"Falta complejoId" };
-  if(!canchaNombre) return { ok:false, error:"Falta cancha" };
-  if(!fecha || !/^\d{4}-\d{2}-\d{2}$/.test(fecha)) return { ok:false, error:"Fecha inválida" };
-  if(!hora || !/^\d{2}:\d{2}$/.test(hora)) return { ok:false, error:"Hora inválida" };
-  return { ok:true };
-}
-function estaHoldActiva(r) {
-  if (!r) return false;
-  const t = typeof r.holdUntil === "number" ? r.holdUntil : Number(r.holdUntil);
-  return r.status === "hold" && t && Date.now() < t;
-}
 
-// ===============================
-// Notificar reserva manual (solo email, no guarda estado)
-// (Si ya lo tenías, podés dejarlo. Ahora la ruta /reservas/manual guarda + notifica.)
-// ===============================
-app.post("/notificar-manual", async (req, res) => {
-  try {
-    const { complejoId, nombre, telefono, monto, clave } = req.body || {};
-    if (!complejoId) return res.status(400).json({ ok:false, error:"Falta complejoId" });
-
-    const { subject, html } = plantillaMailReserva({
-      complejoId,
-      cancha: "", fecha: "", hora: "",
-      nombre, telefono, monto
-    });
-    await enviarEmail(complejoId, subject, html);
-    res.json({ ok:true });
-  } catch (e) {
-    console.error("notificar-manual:", e);
-    res.status(500).json({ ok:false, error:e.message });
-  }
-});
-
-// ===============================
 // ¿Está libre este turno?
-// ===============================
-app.get("/disponible", async (req,res)=>{
+app.get("/disponible", async (req, res) => {
   const { complejoId, cancha, fecha, hora } = req.query || {};
-  const v = validarTurno({complejoId, canchaNombre: cancha, fecha, hora});
-  if(!v.ok) return res.json({ ok:false, motivo:v.error });
+  const v = validarTurno({ complejoId, canchaNombre: cancha, fecha, hora });
+  if (!v.ok) return res.json({ ok: false, motivo: v.error });
 
   try {
-    // Preferimos BD
     const obj = await dao.listarReservasObjCompat();
-    const clave = claveDe({complejoId, canchaNombre: cancha, fecha, hora});
+    const clave = claveDe({ complejoId, canchaNombre: cancha, fecha, hora });
     const r = obj[clave];
     const ocupado = Boolean(
       r && (
         r.status === "approved" ||
-        r.status === "manual"   ||
-        r.status === "blocked"  ||
+        r.status === "manual" ||
+        r.status === "blocked" ||
         (r.status === "hold" && r.holdUntil && Date.now() < r.holdUntil)
       )
     );
-    return res.json({ ok:true, libre: !ocupado });
+    return res.json({ ok: true, libre: !ocupado });
   } catch {
-    // Fallback a archivo (compat)
     const reservas = leerJSON(pathReservas);
-    const clave = claveDe({complejoId, canchaNombre: cancha, fecha, hora});
+    const clave = claveDe({ complejoId, canchaNombre: cancha, fecha, hora });
     const r = reservas[clave];
     const ocupado = Boolean(
       r && (
         r.status === "approved" ||
-        r.status === "manual"   ||
-        r.status === "blocked"  ||
+        r.status === "manual" ||
+        r.status === "blocked" ||
         estaHoldActiva(r)
       )
     );
-    return res.json({ ok:true, libre: !ocupado, via:"archivo" });
+    return res.json({ ok: true, libre: !ocupado, via: "archivo" });
   }
 });
 
-// ===============================
 // Estado de una reserva por clave
-// ===============================
-app.get("/estado-reserva", async (req,res)=>{
+app.get("/estado-reserva", async (req, res) => {
   const { clave } = req.query || {};
-  if(!clave) return res.status(400).json({ error:"Falta clave" });
+  if (!clave) return res.status(400).json({ error: "Falta clave" });
   try {
     const obj = await dao.listarReservasObjCompat();
     const r = obj[clave];
-    if(!r) return res.json({ ok:true, existe:false, status:"none" });
-    return res.json({ ok:true, existe:true, status:r.status, data:r });
+    if (!r) return res.json({ ok: true, existe: false, status: "none" });
+    return res.json({ ok: true, existe: true, status: r.status, data: r });
   } catch {
     const reservas = leerJSON(pathReservas);
     const r = reservas[clave];
-    if(!r) return res.json({ ok:true, existe:false, status:"none", via:"archivo" });
-    return res.json({ ok:true, existe:true, status:r.status, data:r, via:"archivo" });
+    if (!r) return res.json({ ok: true, existe: false, status: "none", via: "archivo" });
+    return res.json({ ok: true, existe: true, status: r.status, data: r, via: "archivo" });
   }
 });
 
-// ===============================
-// Reserva manual (GUARDA en BD + notifica si corresponde)
-// ===============================
+// =======================
+// NUEVA RUTA: Reservar manual (recomendada)
+// =======================
+
+/**
+ * Crea o actualiza una reserva manual para un turno concreto.
+ * Guarda en la base de datos y notifica al dueño si corresponde.
+ * Espera en req.body: { complejoId, cancha, fechaISO, hora, nombre, telefono, monto }
+ */
+app.post("/reservar-manual", async (req, res) => {
+  try {
+    const { complejoId, cancha, fechaISO, hora, nombre, telefono, monto } = req.body || {};
+    if (!complejoId || !cancha || !fechaISO || !hora) {
+      return res.status(400).json({
+        ok: false,
+        error: "Faltan datos: complejoId, cancha, fechaISO, hora"
+      });
+    }
+
+    // Validar el turno
+    const v = validarTurno({ complejoId, canchaNombre: cancha, fecha: fechaISO, hora });
+    if (!v.ok) {
+      return res.status(400).json({ ok: false, error: v.error });
+    }
+
+    // Guarda en la BD como reserva manual
+    if (dao.reservarManualDB) {
+      await dao.reservarManualDB({
+        complex_id: complejoId,
+        cancha,
+        fechaISO,
+        hora,
+        nombre,
+        telefono,
+        monto
+      });
+    } else if (dao.insertarReservaManual) {
+      // fallback: usa la función existente en tu DAO
+      await dao.insertarReservaManual({
+        complex_id: complejoId,
+        cancha,
+        fechaISO,
+        hora,
+        nombre,
+        telefono,
+        monto
+      });
+    } else {
+      return res.status(500).json({
+        ok: false,
+        error: "No hay función disponible para guardar reservas manuales"
+      });
+    }
+
+    // Notifica al dueño por email (solo si notif_email está activo)
+    try {
+      const { subject, html } = plantillaMailReserva({
+        complejoId,
+        cancha,
+        fecha: fechaISO,
+        hora,
+        nombre,
+        telefono,
+        monto
+      });
+      await enviarEmail(complejoId, subject, html);
+    } catch (e) {
+      console.warn("No se pudo enviar email de reserva manual:", e?.message || e);
+    }
+
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error("/reservar-manual error:", e);
+    return res.status(500).json({
+      ok: false,
+      error: e.message || "Error interno"
+    });
+  }
+});
+
+// =======================
+// Reserva manual (LEGACY - mantener compatibilidad)
+// =======================
 app.post("/reservas/manual", async (req, res) => {
   try {
     const { complejoId, cancha, fechaISO, hora, nombre, telefono, monto } = req.body || {};
@@ -518,10 +641,10 @@ app.post("/reservas/manual", async (req, res) => {
         monto
       });
     } else {
-      // Fallback (no recomendado): compat que no borre todo
-      const key = `${complejoId}-${cancha}-${fechaISO}-${hora}`;
+      // Fallback: compat que no borre todo
+      const key = claveDe({ complejoId, canchaNombre: cancha, fecha: fechaISO, hora });
       const obj = {
-        [key]: { status:"manual", nombre:nombre||"", telefono:telefono||"", monto:Number(monto||0)||0, creado:Date.now() },
+        [key]: { status: "manual", nombre: nombre || "", telefono: telefono || "", monto: Number(monto || 0) || 0, creado: Date.now() },
         __append: true
       };
       await dao.guardarReservasObjCompat(obj);
@@ -532,7 +655,7 @@ app.post("/reservas/manual", async (req, res) => {
       const { subject, html } = plantillaMailReserva({
         complejoId, cancha, fecha: fechaISO, hora, nombre, telefono, monto
       });
-      await enviarEmail(complejoId, subject, html); // respeta notif_email/owner_email
+      await enviarEmail(complejoId, subject, html);
     } catch (e) {
       console.warn("No se pudo enviar email de reserva manual:", e?.message || e);
     }
@@ -543,9 +666,63 @@ app.post("/reservas/manual", async (req, res) => {
     res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 });
+
+// Notificar reserva manual (solo email, no guarda estado)
+app.post("/notificar-manual", async (req, res) => {
+  try {
+    const { complejoId, nombre, telefono, monto, clave } = req.body || {};
+    if (!complejoId) return res.status(400).json({ ok: false, error: "Falta complejoId" });
+
+    const { subject, html } = plantillaMailReserva({
+      complejoId,
+      cancha: "", fecha: "", hora: "",
+      nombre, telefono, monto
+    });
+    await enviarEmail(complejoId, subject, html);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("notificar-manual:", e);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // =======================
-// PAGOS: crear preferencia + Webhook (SOLO OAuth)
+// LOGIN
 // =======================
+
+app.post("/login", async (req, res) => {
+  const id = String(req.body?.complejo || "").trim();
+  const pass = String(req.body?.password || "").trim();
+
+  if (!id || !pass) return res.status(400).json({ error: "Faltan datos" });
+
+  let ok = false;
+
+  // 1) Chequeo en la DB
+  try {
+    const r = await dao.loginDueno(id, pass);
+    ok = !!r?.ok;
+  } catch (e) {
+    console.error("DB /login:", e);
+  }
+
+  // 2) Fallback a archivo (por si la DB no tenía la clave guardada aún)
+  if (!ok) {
+    try {
+      const datos = leerJSON(pathDatos);
+      const claveArchivo = String(datos?.[id]?.clave || "").trim();
+      if (claveArchivo && claveArchivo === pass) ok = true;
+    } catch {}
+  }
+
+  if (!ok) return res.status(401).json({ error: "Contraseña incorrecta" });
+  res.json({ ok: true });
+});
+
+// =======================
+// PAGOS: crear preferencia (SOLO OAuth)
+// =======================
+
 app.post("/crear-preferencia", async (req, res) => {
   const {
     complejoId,
@@ -566,9 +743,9 @@ app.post("/crear-preferencia", async (req, res) => {
   // construir/validar clave
   let clave = claveLegacy;
   if (cancha && fecha && hora) {
-    const v = validarTurno({complejoId, canchaNombre: cancha, fecha, hora});
-    if(!v.ok) return res.status(400).json({ error: v.error });
-    clave = claveDe({complejoId, canchaNombre: cancha, fecha, hora});
+    const v = validarTurno({ complejoId, canchaNombre: cancha, fecha, hora });
+    if (!v.ok) return res.status(400).json({ error: v.error });
+    clave = claveDe({ complejoId, canchaNombre: cancha, fecha, hora });
   }
   if (!clave) {
     return res.status(400).json({ error: "Faltan cancha/fecha/hora (o clave)" });
@@ -693,7 +870,7 @@ app.post("/crear-preferencia", async (req, res) => {
     }
 
     // 3) Preferencia OK → indexamos prefId -> clave/complejo y devolvemos
-    const prefId    = result?.id || result?.body?.id || result?.response?.id;
+    const prefId = result?.id || result?.body?.id || result?.response?.id;
     const initPoint = result?.init_point || result?.body?.init_point || result?.response?.init_point || "";
 
     const idx = leerJSON(pathIdx);
@@ -742,6 +919,7 @@ app.post("/crear-preferencia", async (req, res) => {
 // =======================
 // Webhook de Mercado Pago
 // =======================
+
 app.post("/webhook-mp", async (req, res) => {
   try {
     // responder rápido para que MP no reintente de más
@@ -757,8 +935,8 @@ app.post("/webhook-mp", async (req, res) => {
     if (process.env.MP_ACCESS_TOKEN) tokensATestar.push(process.env.MP_ACCESS_TOKEN);
     for (const k of Object.keys(cred)) {
       if (cred[k]?.oauth?.access_token) tokensATestar.push(cred[k].oauth.access_token);
-      if (cred[k]?.access_token)        tokensATestar.push(cred[k].access_token);
-      if (cred[k]?.mp_access_token)     tokensATestar.push(cred[k].mp_access_token);
+      if (cred[k]?.access_token) tokensATestar.push(cred[k].access_token);
+      if (cred[k]?.mp_access_token) tokensATestar.push(cred[k].mp_access_token);
     }
 
     let pago = null;
@@ -814,7 +992,7 @@ app.post("/webhook-mp", async (req, res) => {
 
       escribirJSON(pathReservas, { ...reservas, [clave]: r });
 
-      // 🔔 Enviar email al dueño
+      // 📧 Enviar email al dueño
       const infoNoti = {
         clave,
         complejoId: r.complejoId,
@@ -843,7 +1021,10 @@ app.post("/webhook-mp", async (req, res) => {
   }
 });
 
-// ===== OAuth Mercado Pago: conectar / estado / callback
+// =======================
+// OAuth Mercado Pago: conectar / estado / callback
+// =======================
+
 app.get("/mp/conectar", (req, res) => {
   const { complejoId } = req.query;
   if (!complejoId) return res.status(400).send("Falta complejoId");
@@ -860,7 +1041,7 @@ app.get("/mp/conectar", (req, res) => {
 
 app.get("/mp/estado", async (req, res) => {
   const { complejoId } = req.query;
-  if (!complejoId) return res.status(400).json({ ok:false, error:"Falta complejoId" });
+  if (!complejoId) return res.status(400).json({ ok: false, error: "Falta complejoId" });
 
   // DB primero
   let conectado = false;
@@ -869,13 +1050,13 @@ app.get("/mp/estado", async (req, res) => {
       const t = await dao.getMpOAuth(complejoId);
       conectado = !!t?.access_token;
     }
-  } catch {}
+  } catch { }
   // Fallback a archivo
   if (!conectado) {
     const creds = leerCredsMP_OAUTH();
     conectado = !!creds?.[complejoId]?.oauth?.access_token;
   }
-  res.json({ ok:true, conectado });
+  res.json({ ok: true, conectado });
 });
 
 app.get("/mp/callback", async (req, res) => {
@@ -955,167 +1136,9 @@ app.get("/mp/callback", async (req, res) => {
   }
 });
 
-// ====== Email (Gmail) ======
-const nodemailer = require("nodemailer");
-
-// lee contacto y switches priorizando DB; fallback al cache o JSON
-async function getOwnerConfig(complejoId) {
-  try {
-    if (dao?.leerContactoComplejo) {
-      const r = await dao.leerContactoComplejo(complejoId);
-      if (r) {
-        return {
-          owner_email: r.owner_email || "",
-          owner_phone: r.owner_phone || "",
-          notif_email: !!r.notif_email,
-          notif_whats: !!r.notif_whats,
-        };
-      }
-    }
-  } catch (e) {
-    console.warn("getOwnerConfig DB", e?.message || e);
-  }
-  // fallback al cache/archivo (compat)
-  const datos = Object.keys(_cacheComplejosCompat||{}).length ? _cacheComplejosCompat : leerJSON(pathDatos);
-  const conf = datos?.[complejoId] || {};
-  const notif = conf.notif || {};
-  return {
-    owner_email: conf.emailDueño || "",
-    owner_phone: conf.whatsappDueño || "",
-    notif_email: !!notif.email,
-    notif_whats: !!notif.whats
-  };
-}
-
-function plantillaMailReserva({ complejoId, cancha, fecha, hora, nombre, telefono, monto }) {
-  const telFmt = telefono ? (String(telefono).startsWith('+') ? telefono : `+${String(telefono).replace(/\D/g,'')}`) : 's/d';
-  const montoFmt = (monto!=null && monto!=="") ? `ARS $${Number(monto).toLocaleString('es-AR')}` : '—';
-  const titulo = `NUEVA RESERVA – ${cancha || ''} ${hora || ''}`.trim();
-
-  const html = `
-    <div style="font-family:system-ui,Segoe UI,Arial,sans-serif;line-height:1.45">
-      <h2 style="margin:0 0 10px">NUEVA RESERVA</h2>
-      <p><b>Complejo:</b> ${complejoId}</p>
-      <p><b>Cancha:</b> ${cancha || 's/d'}</p>
-      <p><b>Fecha:</b> ${fecha || 's/d'} <b>Hora:</b> ${hora || 's/d'}</p>
-      <p><b>Cliente:</b> ${nombre || '—'}</p>
-      <p><b>Teléfono:</b> ${telFmt}</p>
-      <p><b>Seña:</b> ${montoFmt}</p>
-      <hr style="border:none;height:1px;background:#ddd;margin:12px 0" />
-      <small style="color:#666">Recomplejos</small>
-    </div>`;
-  return { subject: titulo, html };
-}
 // =======================
-// Notificaciones (solo Email con Gmail)
+// Rutas de contacto y notificaciones
 // =======================
-// ====== Email (Gmail) ======
-// lee contacto y switches priorizando DB; fallback al cache o JSON
-async function getOwnerConfig(complejoId) {
-  try {
-    if (dao?.leerContactoComplejo) {
-      const r = await dao.leerContactoComplejo(complejoId);
-      if (r) {
-        return {
-          owner_email: r.owner_email || "",
-          owner_phone: r.owner_phone || "",
-          notif_email: !!r.notif_email,
-          notif_whats: !!r.notif_whats,
-        };
-      }
-    }
-  } catch (e) {
-    console.warn("getOwnerConfig DB", e?.message || e);
-  }
-  // fallback (cache/archivo) por compat
-  const datos = Object.keys(_cacheComplejosCompat||{}).length ? _cacheComplejosCompat : leerJSON(pathDatos);
-  const conf = datos?.[complejoId] || {};
-  const notif = conf.notif || {};
-  return {
-    owner_email: conf.emailDueño || "",
-    owner_phone: conf.whatsappDueño || "",
-    notif_email: !!notif.email,
-    notif_whats: !!notif.whats
-  };
-}
-
-function plantillaMailReserva({ complejoId, cancha, fecha, hora, nombre, telefono, monto }) {
-  const telFmt = telefono ? (String(telefono).startsWith('+') ? telefono : `+${String(telefono).replace(/\D/g,'')}`) : 's/d';
-  const montoFmt = (monto!=null && monto!=="") ? `ARS $${Number(monto).toLocaleString('es-AR')}` : '—';
-  const titulo = `NUEVA RESERVA – ${cancha || ''} ${hora || ''}`.trim();
-
-  const html = `
-    <div style="font-family:system-ui,Segoe UI,Arial,sans-serif;line-height:1.45">
-      <h2 style="margin:0 0 10px">NUEVA RESERVA</h2>
-      <p><b>Complejo:</b> ${complejoId}</p>
-      <p><b>Cancha:</b> ${cancha || 's/d'}</p>
-      <p><b>Fecha:</b> ${fecha || 's/d'} <b>Hora:</b> ${hora || 's/d'}</p>
-      <p><b>Cliente:</b> ${nombre || '—'}</p>
-      <p><b>Teléfono:</b> ${telFmt}</p>
-      <p><b>Seña:</b> ${montoFmt}</p>
-      <hr style="border:none;height:1px;background:#ddd;margin:12px 0" />
-      <small style="color:#666">Recomplejos</small>
-    </div>`;
-  return { subject: titulo, html };
-}
-
-async function enviarEmail(complejoId, subject, html) {
-  try {
-    const { owner_email, notif_email } = await getOwnerConfig(complejoId);
-    if (!notif_email || !owner_email) return; // no activado o sin email
-
-    const transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: { user: process.env.GMAIL_USER, pass: process.env.GOOGLE_APP_PASSWORD },
-    });
-
-    await transporter.sendMail({ from: process.env.GMAIL_USER, to: owner_email, subject, html });
-    console.log("[EMAIL] enviado a", owner_email);
-  } catch (e) {
-    console.error("[EMAIL] error:", e?.message || e);
-  }
-}
-async function notificarAprobado({ clave, complejoId, nombre, telefono, monto }) {
-  try {
-    const info = typeof parseClaveServidor === "function" ? (parseClaveServidor(clave) || {}) : {};
-    const { subject, html } = plantillaMailReserva({
-      complejoId,
-      cancha: info.cancha,
-      fecha: info.fechaISO,
-      hora: info.hora,
-      nombre,
-      telefono,
-      monto
-    });
-    await enviarEmail(complejoId, subject, html);
-  } catch (e) {
-    console.error("notificarAprobado error:", e?.message || e);
-  }
-}
-// Endpoint de prueba (GET para abrirlo en el navegador)
-app.get("/__test-email", async (req, res) => {
-  try {
-    const complejoId = String(req.query.complejoId || "").trim();
-    if (!complejoId) return res.status(400).json({ ok:false, error:"Falta ?complejoId=" });
-
-    const { subject, html } = plantillaMailReserva({
-      complejoId,
-      cancha: "Prueba",
-      fecha: new Date().toISOString().slice(0,10),
-      hora: "20:00",
-      nombre: "Tester",
-      telefono: "",
-      monto: 1234
-    });
-
-    await enviarEmail(complejoId, subject, html);
-    res.json({ ok: true, msg: `Email de prueba enviado para complejo ${complejoId}.` });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
-// Arriba ya debés tener: const dao = require('./dao');
 
 app.get('/complejos/:id/contacto', async (req, res) => {
   try {
@@ -1149,7 +1172,10 @@ app.post('/complejos/:id/notificaciones', async (req, res) => {
   }
 });
 
-// === MP: guardar credenciales pos-onboarding u OAuth callback ===
+// =======================
+// Rutas MP credenciales
+// =======================
+
 app.post('/complejos/:id/mp/credenciales', async (req, res) => {
   try {
     const saved = await dao.guardarCredencialesMP(req.params.id, req.body || {});
@@ -1160,7 +1186,6 @@ app.post('/complejos/:id/mp/credenciales', async (req, res) => {
   }
 });
 
-// === MP: leer credenciales (para crear preferencia, etc.) ===
 app.get('/complejos/:id/mp/credenciales', async (req, res) => {
   try {
     const creds = await dao.leerCredencialesMP(req.params.id);
@@ -1170,17 +1195,48 @@ app.get('/complejos/:id/mp/credenciales', async (req, res) => {
     res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
-app.get("/__health_db", async (_req,res)=>{
+
+// =======================
+// Health checks y testing
+// =======================
+
+app.get("/__health_db", async (_req, res) => {
   try {
     const d = await dao.listarComplejos();
-    res.json({ ok:true, via:"db", count:Object.keys(d||{}).length });
+    res.json({ ok: true, via: "db", count: Object.keys(d || {}).length });
   } catch (e) {
-    res.status(500).json({ ok:false, error:String(e) });
+    res.status(500).json({ ok: false, error: String(e) });
   }
 });
+
+// Endpoint de prueba (GET para abrirlo en el navegador)
+app.get("/__test-email", async (req, res) => {
+  try {
+    const complejoId = String(req.query.complejoId || "").trim();
+    if (!complejoId) return res.status(400).json({ ok: false, error: "Falta ?complejoId=" });
+
+    const { subject, html } = plantillaMailReserva({
+      complejoId,
+      cancha: "Prueba",
+      fecha: new Date().toISOString().slice(0, 10),
+      hora: "20:00",
+      nombre: "Tester",
+      telefono: "",
+      monto: 1234
+    });
+
+    await enviarEmail(complejoId, subject, html);
+    res.json({ ok: true, msg: `Email de prueba enviado para complejo ${complejoId}.` });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // =======================
-// Arranque
+// Arranque del servidor
 // =======================
+
 app.listen(PORT, () => {
   console.log(`Server escuchando en http://0.0.0.0:${PORT}`);
 });
