@@ -1,4 +1,4 @@
-// dao.js — versión saneada (exports unificados + fix ON CONFLICT + sin duplicados)
+// dao.js — versión saneada (fix ON CONFLICT sobre índice parcial `uniq_turno`)
 const pool = require('./db');
 // const bcrypt = require('bcrypt'); // si después migrás login a hash, descomentá
 
@@ -103,7 +103,6 @@ async function guardarDatosComplejos(merged) {
         d.nombre || id,
         d.ciudad || null,
         d.maps || d.maps_iframe || null,
-        // si columnas son jsonb, pasar arrays/objetos directo es válido con pg
         d.servicios || [],
         d.imagenes || [],
         d.clave || null
@@ -210,15 +209,14 @@ async function guardarReservasObjCompat(obj) {
     await client.query('begin');
     await client.query('delete from reservations');
 
-  const fieldQ = `
-  select id from fields
-  where complex_id=$1 and (
-    unaccent(lower(regexp_replace(name,'\\s+','','g'))) = unaccent(lower(regexp_replace($2,'\\s+','','g')))
-    or ($2 ~ '^[0-9]+$' and jugadores = ($2)::int)
-  )
-  limit 1
-`;
-
+    const fieldQ = `
+      select id from fields
+      where complex_id=$1 and (
+        unaccent(lower(regexp_replace(name,'\\s+','','g'))) = unaccent(lower(regexp_replace($2,'\\s+','','g')))
+        or ($2 ~ '^[0-9]+$' and jugadores = ($2)::int)
+      )
+      limit 1
+    `;
 
     for (const key of Object.keys(obj || {})) {
       const parts = key.split('-');
@@ -265,22 +263,22 @@ async function guardarReservasObjCompat(obj) {
 
 async function crearHold({ complex_id, cancha, fechaISO, hora, nombre, telefono, monto, holdMinutes=10 }) {
   const fieldQ = `
-  select id from fields
-  where complex_id=$1 and (
-    unaccent(lower(regexp_replace(name,'\\s+','','g'))) = unaccent(lower(regexp_replace($2,'\\s+','','g')))
-    or ($2 ~ '^[0-9]+$' and jugadores = ($2)::int)
-  )
-  limit 1
-`;
+    select id from fields
+    where complex_id=$1 and (
+      unaccent(lower(regexp_replace(name,'\\s+','','g'))) = unaccent(lower(regexp_replace($2,'\\s+','','g')))
+      or ($2 ~ '^[0-9]+$' and jugadores = ($2)::int)
+    )
+    limit 1
+  `;
   const { rows } = await pool.query(fieldQ, [complex_id, cancha]);
   if (!rows.length) return false;
   const field_id = rows[0].id;
 
-  // ✅ ON CONFLICT correcto (apoya en el índice único (complex_id, field_id, fecha, hora))
+  // ✅ usar el constraint explícito por índice parcial
   const ins = await pool.query(`
     insert into reservations (complex_id, field_id, fecha, hora, status, nombre, telefono, monto, hold_until)
     values ($1,$2,$3,$4,'hold',$5,$6,$7, now() + ($8 || ' minutes')::interval)
-    on conflict (complex_id,field_id,fecha,hora)
+    on conflict on constraint uniq_turno
       do nothing
     returning id
   `, [complex_id, field_id, fechaISO, hora, nombre || null, telefono || null, monto || null, holdMinutes]);
@@ -419,22 +417,23 @@ async function leerCredencialesMP(complexId) {
 
 // Inserta o actualiza una reserva 'manual' (1 turno)
 async function insertarReservaManual({ complex_id, cancha, fechaISO, hora, nombre, telefono, monto }) {
- const fieldQ = `
-  select id from fields
-  where complex_id=$1 and (
-    unaccent(lower(regexp_replace(name,'\\s+','','g'))) = unaccent(lower(regexp_replace($2,'\\s+','','g')))
-    or ($2 ~ '^[0-9]+$' and jugadores = ($2)::int)
-  )
-  limit 1
-`;
+  const fieldQ = `
+    select id from fields
+    where complex_id=$1 and (
+      unaccent(lower(regexp_replace(name,'\\s+','','g'))) = unaccent(lower(regexp_replace($2,'\\s+','','g')))
+      or ($2 ~ '^[0-9]+$' and jugadores = ($2)::int)
+    )
+    limit 1
+  `;
   const f = await pool.query(fieldQ, [complex_id, cancha]);
   if (!f.rowCount) throw new Error("Cancha no encontrada");
   const field_id = f.rows[0].id;
 
+  // ✅ usar constraint explícito porque el índice único es PARCIAL
   await pool.query(`
     insert into reservations (complex_id, field_id, fecha, hora, status, nombre, telefono, monto)
     values ($1,$2,$3,$4,'manual',$5,$6,$7)
-    on conflict (complex_id, field_id, fecha, hora)
+    on conflict on constraint uniq_turno
       do update set status='manual', nombre=$5, telefono=$6, monto=$7, hold_until=null
   `, [complex_id, field_id, fechaISO, hora, nombre || null, telefono || null, monto || null]);
 
@@ -454,9 +453,8 @@ module.exports = {
   guardarReservasObjCompat,
   crearHold,
   actualizarReservaTrasPago,
-  insertarReservaManual,      // <- la que usás desde el server
-  // alias opcional si en algún lado la llamaste distinto:
-  reservarManualDB: insertarReservaManual,
+  insertarReservaManual,      // <- la que usa el servidor
+  reservarManualDB: insertarReservaManual, // alias opcional
 
   // === MP OAuth ===
   upsertMpOAuth,
