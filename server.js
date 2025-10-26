@@ -22,8 +22,39 @@ console.log("DAO sanity:", {
 // --- App & middlewares
 const app = express();
 const PORT = process.env.PORT || 3000;
-app.use(cors());
+
 app.use(express.json());
+
+// === Middlewares base ===
+app.use(express.json());                       // para parsear JSON
+app.use(express.urlencoded({ extended: true })); // para parsear formularios (x-www-form-urlencoded)
+
+
+// --- CORS (permitimos GH Pages y localhost) ---
+const ALLOWED_ORIGINS = [
+  'https://ramiroaldeco.github.io',
+  'https://ramiroaldeco.github.io/recomplejos-frontend',
+  'http://localhost:5500',
+  'http://127.0.0.1:5500'
+];
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+  // Para caches intermedios/CDN
+  res.setHeader('Vary', 'Origin');
+
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204); // preflight OK
+  }
+  next();
+});
+
 
 // >>> JWT ADD – middleware de auth
 function auth(req, res, next) {
@@ -420,19 +451,6 @@ async function notificarAprobado({ clave, complejoId, nombre, telefono, monto })
 
 // Cache breve para validación
 let _cacheComplejosCompat = {};
-
-// Datos de complejos (desde BD) con fallback a archivo
-app.get("/datos_complejos", async (_req, res) => {
-  try {
-    res.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
-    const d = await dao.listarComplejos();
-    _cacheComplejosCompat = d;
-    res.json(d);
-  } catch (e) {
-    console.error("DB /datos_complejos", e);
-    res.json(leerJSON(pathDatos)); // fallback
-  }
-});
 
 // Guardar datos mergeados (onboarding)
 app.post("/guardarDatos", async (req, res) => {
@@ -1221,6 +1239,18 @@ app.get("/__health_db", async (_req, res) => {
     res.status(500).json({ ok: false, error: String(e) });
   }
 });
+
+// --- Datos para el panel (frontend micomplejo.html) ---
+app.get('/datos_complejos', async (req, res) => {
+  try {
+    const data = await dao.listarComplejos();
+    res.json({ ok: true, data });
+  } catch (e) {
+    console.error('Error en /datos_complejos:', e);
+    res.status(500).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
 
 // Endpoint de prueba (GET para abrirlo en el navegador)
 app.get("/__test-email", async (req, res) => {
