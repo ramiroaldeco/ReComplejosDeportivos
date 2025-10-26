@@ -485,15 +485,17 @@ app.post("/alta-credencial", (req, res) => {
 // =======================
 
 // Reservas → leer de BD (compat: archivo si falla)
-app.get("/reservas", async (_req, res) => {
+// --- Reservas para el panel (devuelve objeto { clave: datos }) ---
+app.get("/reservas", async (req, res) => {
   try {
-    const r = await dao.listarReservasObjCompat();
-    res.json(r);
+    const data = await dao.listarReservasObjCompat(); // usa el DAO que ya tenés
+    res.json(data);
   } catch (e) {
-    console.error("DB /reservas", e);
-    res.json(leerJSON(pathReservas)); // fallback
+    console.error("Error en /reservas:", e);
+    res.status(500).json({ ok: false, error: String(e.message || e) });
   }
 });
+
 
 // Guardar reservas masivo (panel dueño)
 app.post("/guardarReservas", async (req, res) => {
