@@ -671,35 +671,36 @@ app.post("/reservas/manual", async (req, res) => {
       };
       await dao.guardarReservasObjCompat(obj);
     }
-// Email al dueño (si notif_email y owner_email en DB)
-try {
-  // recuperar nombre legible desde la caché de datos
-  let canchaLegible = cancha;
-  try {
-    const info = _cacheComplejosCompat?.[complejoId];
-    const match = (info?.canchas || []).find(
-      c => slugCancha(c.nombre) === slugCancha(cancha)
-    );
-    if (match?.nombre) canchaLegible = match.nombre;
-  } catch (_) {}
 
-  const { subject, html } = plantillaMailReserva({
-    complejoId,
-    cancha: canchaLegible,
-    fecha: fechaISO,
-    hora,
-    nombre,
-    telefono,
-    monto
-  });
-  await enviarEmail(complejoId, subject, html);
-} catch (e) {
-  console.warn("No se pudo enviar email de reserva manual:", e?.message || e);
-}
+    // Email al dueño (si notif_email y owner_email en DB)
+    try {
+      let canchaLegible = cancha;
+      try {
+        const info = _cacheComplejosCompat?.[complejoId];
+        const match = (info?.canchas || []).find(c => slugCancha(c.nombre) === slugCancha(cancha));
+        if (match?.nombre) canchaLegible = match.nombre;
+      } catch (_) {}
 
-return res.json({ ok: true });
+      const { subject, html } = plantillaMailReserva({
+        complejoId,
+        cancha: canchaLegible,
+        fecha: fechaISO,
+        hora,
+        nombre,
+        telefono,
+        monto
+      });
+      await enviarEmail(complejoId, subject, html);
+    } catch (e) {
+      console.warn("No se pudo enviar email de reserva manual:", e?.message || e);
+    }
 
-
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error("/reservas/manual error:", e);
+    return res.status(500).json({ ok: false, error: e.message || "Error interno" });
+  }
+}); // ← ← ← ESTE CIERRE FALTABA
 // Notificar reserva manual (solo email, no guarda estado)
 app.post("/notificar-manual", async (req, res) => {
   try {
