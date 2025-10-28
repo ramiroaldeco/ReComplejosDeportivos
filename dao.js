@@ -261,7 +261,7 @@ async function guardarReservasObjCompat(obj) {
 
 /* ===================== UTIL: HOLD / PAGO ===================== */
 
-async function crearHold({ complex_id, cancha, fechaISO, hora, nombre, telefono, monto, holdMinutes=10 }) {
+async function crearHold({ complex_id, cancha, fechaISO, hora, nombre, telefono, monto, holdMinutes = 10 }) {
   const fieldQ = `
     select id from fields
     where complex_id=$1 and (
@@ -274,17 +274,23 @@ async function crearHold({ complex_id, cancha, fechaISO, hora, nombre, telefono,
   if (!rows.length) return false;
   const field_id = rows[0].id;
 
-  // ✅ usar el constraint explícito por índice parcial
+  // ✅ Inserta HOLD y evita duplicados por columnas (no depende del nombre uniq_turno)
   const ins = await pool.query(`
     insert into reservations (complex_id, field_id, fecha, hora, status, nombre, telefono, monto, hold_until)
     values ($1,$2,$3,$4,'hold',$5,$6,$7, now() + ($8 || ' minutes')::interval)
-    on conflict on constraint uniq_turno
-      do nothing
+    on conflict (complex_id, field_id, fecha, hora)
+    do update set
+      status = 'hold',
+      nombre = excluded.nombre,
+      telefono = excluded.telefono,
+      monto = excluded.monto,
+      hold_until = now() + ($8 || ' minutes')::interval
     returning id
   `, [complex_id, field_id, fechaISO, hora, nombre || null, telefono || null, monto || null, holdMinutes]);
 
   return ins.rowCount > 0;
 }
+
 
 async function actualizarReservaTrasPago({ preference_id, payment_id, status, nombre, telefono }) {
   const { rowCount } = await pool.query(`
@@ -429,13 +435,19 @@ async function insertarReservaManual({ complex_id, cancha, fechaISO, hora, nombr
   if (!f.rowCount) throw new Error("Cancha no encontrada");
   const field_id = f.rows[0].id;
 
-  // ✅ usar constraint explícito porque el índice único es PARCIAL
-  await pool.query(`
-    insert into reservations (complex_id, field_id, fecha, hora, status, nombre, telefono, monto)
-    values ($1,$2,$3,$4,'manual',$5,$6,$7)
-    on conflict on constraint uniq_turno
-      do update set status='manual', nombre=$5, telefono=$6, monto=$7, hold_until=null
-  `, [complex_id, field_id, fechaISO, hora, nombre || null, telefono || null, monto || null]);
+ // ✅ versión robusta: usa las columnas en lugar del nombre del constraint
+await pool.query(`
+  insert into reservations (complex_id, field_id, fecha, hora, status, nombre, telefono, monto)
+  values ($1,$2,$3,$4,'manual',$5,$6,$7)
+  on conflict (complex_id, field_id, fecha, hora)
+  do update set
+    status = 'manual',
+    nombre = excluded.nombre,
+    telefono = excluded.telefono,
+    monto = excluded.monto,
+    hold_until = null
+`, [complex_id, field_id, fechaISO, hora, nombre || null, telefono || null, monto || null]);
+
 
   return { ok: true };
 }
