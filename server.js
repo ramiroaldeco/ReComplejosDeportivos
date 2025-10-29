@@ -646,61 +646,66 @@ app.post("/reservar-manual", async (req, res) => {
 // =======================
 app.post("/reservas/manual", async (req, res) => {
   try {
-    const { complejoId, cancha, fechaISO, hora, nombre, telefono, monto } = req.body || {};
+    let { complejoId, cancha, fechaISO, hora, nombre, telefono, monto } = req.body || {};
+
+    // normalizaciones mínimas
+    complejoId = String(complejoId || "").trim();
+    cancha     = String(cancha || "").trim();
+    fechaISO   = String(fechaISO || "").slice(0, 10);   // YYYY-MM-DD
+    hora       = String(hora || "").slice(0, 5);        // HH:MM
+    nombre     = (nombre ?? "").toString().trim();
+    telefono   = (telefono ?? "").toString().trim();
+    monto      = Number(monto ?? 0);
+
     if (!complejoId || !cancha || !fechaISO || !hora) {
-      return res.status(400).json({ ok: false, error: "Faltan datos: complejoId, cancha, fechaISO, hora" });
+      return res.status(400).json({ ok:false, error:"Faltan complejoId, cancha, fechaISO, hora" });
     }
 
     // Inserta/actualiza en BD como 'manual'
-    if (dao.insertarReservaManual) {
+    try {
       await dao.insertarReservaManual({
         complex_id: complejoId,
-        cancha,
-        fechaISO,
-        hora,
-        nombre,
-        telefono,
-        monto
+        cancha, fechaISO, hora, nombre, telefono, monto
       });
-    } else {
-      // Fallback: compat que no borre todo
-      const key = claveDe({ complejoId, canchaNombre: cancha, fecha: fechaISO, hora });
-      const obj = {
-        [key]: { status: "manual", nombre: nombre || "", telefono: telefono || "", monto: Number(monto || 0) || 0, creado: Date.now() },
-        __append: true
-      };
-      await dao.guardarReservasObjCompat(obj);
+    } catch (err) {
+      // mensaje más claro si la cancha no existe en ese complejo
+      if ((err.message || "").toLowerCase().includes("cancha no encontrada")) {
+        return res.status(404).json({ ok:false, error:"La cancha no existe para este complejo" });
+      }
+      throw err;
     }
 
-    // Email al dueño (si notif_email y owner_email en DB)
-    try {
-      let canchaLegible = cancha;
+    // Email al dueño (si notif_email y owner_email en DB) — no bloquea el OK
+    (async () => {
       try {
-        const info = _cacheComplejosCompat?.[complejoId];
-        const match = (info?.canchas || []).find(c => slugCancha(c.nombre) === slugCancha(cancha));
-        if (match?.nombre) canchaLegible = match.nombre;
-      } catch (_) {}
+        let canchaLegible = cancha;
+        try {
+          const info = _cacheComplejosCompat?.[complejoId];
+          const match = (info?.canchas || []).find(c => slugCancha(c.nombre) === slugCancha(cancha));
+          if (match?.nombre) canchaLegible = match.nombre;
+        } catch {}
+        const { subject, html } = plantillaMailReserva({
+          complejoId,
+          cancha: canchaLegible,
+          fecha: fechaISO,
+          hora,
+          nombre,
+          telefono,
+          monto
+        });
+        await enviarEmail(complejoId, subject, html);
+      } catch (e) {
+        console.warn("No se pudo enviar email de reserva manual:", e?.message || e);
+      }
+    })();
 
-      const { subject, html } = plantillaMailReserva({
-        complejoId,
-        cancha: canchaLegible,
-        fecha: fechaISO,
-        hora,
-        nombre,
-        telefono,
-        monto
-      });
-      await enviarEmail(complejoId, subject, html);
-    } catch (e) {
-      console.warn("No se pudo enviar email de reserva manual:", e?.message || e);
-    }
-
-    return res.json({ ok: true });
+    return res.json({ ok:true });
   } catch (e) {
     console.error("/reservas/manual error:", e);
-    return res.status(500).json({ ok: false, error: e.message || "Error interno" });
+    return res.status(500).json({ ok:false, error: e.message || "Error interno" });
   }
-}); // ← ← ← ESTE CIERRE FALTABA
+});
+
 // Notificar reserva manual (solo email, no guarda estado)
 app.post("/notificar-manual", async (req, res) => {
   try {
@@ -769,12 +774,13 @@ app.post("/crear-preferencia", async (req, res) => {
     nombre, telefono
   } = req.body || {};
 
-  const monto = Number((precio ?? senia));
+  // ===== Validaciones básicas =====
+  const monto = Number(precio ?? senia ?? 0);
   if (!complejoId || !monto) {
     return res.status(400).json({ error: "Faltan datos (complejoId/monto)" });
   }
 
-  // construir/validar clave
+  // Construir/validar clave de turno
   let clave = claveLegacy;
   if (cancha && fecha && hora) {
     const v = validarTurno({ complejoId, canchaNombre: cancha, fecha, hora });
@@ -785,11 +791,8 @@ app.post("/crear-preferencia", async (req, res) => {
     return res.status(400).json({ error: "Faltan cancha/fecha/hora (o clave)" });
   }
 
-  // --- HOLD en BD (solo si llegaron cancha/fecha/hora) ---
+  // ===== HOLD en BD (si vino turno explícito) =====
   if (cancha && fecha && hora) {
-    const v = validarTurno({ complejoId, canchaNombre: cancha, fecha, hora });
-    if (!v.ok) return res.status(400).json({ error: v.error });
-
     try {
       const okHold = await dao.crearHold({
         complex_id: complejoId,
@@ -805,14 +808,14 @@ app.post("/crear-preferencia", async (req, res) => {
         return res.status(409).json({ error: "El turno ya está tomado" });
       }
     } catch (e) {
-      console.error("DB crear hold:", e);
-      // seguimos: también se hace HOLD en archivo más abajo
+      console.error("DB crear hold:", e?.message || e);
+      // seguimos: también hacemos HOLD en archivo abajo
     }
   } else if (!claveLegacy) {
     return res.status(400).json({ error: "Faltan cancha/fecha/hora (o clave)" });
   }
 
-  // HOLD también en archivo (compat panel viejo)
+  // ===== HOLD en archivo (compat panel viejo) =====
   const reservas = leerJSON(pathReservas);
   const holdUntil = Date.now() + HOLD_MIN * 60 * 1000;
   reservas[clave] = {
@@ -828,6 +831,122 @@ app.post("/crear-preferencia", async (req, res) => {
     hora: hora || ""
   };
   escribirJSON(pathReservas, reservas);
+
+  // ===== Helper MercadoPago =====
+  const crearCon = async (accessToken) => {
+    const mp = new MercadoPagoConfig({ accessToken });
+    const preference = new Preference(mp);
+    return await preference.create({
+      body: {
+        items: [{
+          title: titulo || "Seña de reserva",
+          unit_price: monto,
+          quantity: 1,
+          currency_id: "ARS"
+        }],
+        back_urls: {
+          success: `${process.env.PUBLIC_URL}/reservar-exito.html`,
+          pending: `${process.env.PUBLIC_URL}/reservar-pendiente.html`,
+          failure: `${process.env.PUBLIC_URL}/reservar-error.html`
+        },
+        auto_return: "approved",
+        notification_url: `${process.env.BACKEND_URL}/webhook-mp`,
+        metadata: {
+          clave,
+          complejoId,
+          nombre: nombre || "",
+          telefono: telefono || ""
+        }
+      }
+    });
+  };
+
+  try {
+    // 1) Intento con token por complejo (OAuth en DB/archivo)
+    let result;
+    try {
+      const tok = await tokenParaAsync(complejoId); // tu helper existente
+      result = await crearCon(tok);
+    } catch (err1) {
+      if (!isInvalidTokenError(err1)) throw err1;
+
+      // 2) Fallback a otros tokens disponibles (ENV + archivo credenciales)
+      const cred = leerJSON(pathCreds);
+      const candidatos = [
+        process.env.MP_ACCESS_TOKEN,
+        ...Object.values(cred || {}).flatMap(c => [
+          c?.oauth?.access_token,
+          c?.access_token,
+          c?.mp_access_token
+        ]).filter(Boolean)
+      ];
+      let ok = false;
+      for (const t of candidatos) {
+        try { result = await crearCon(t); ok = true; break; } catch (_) {}
+      }
+      if (!ok) {
+        // liberar hold en archivo antes de salir
+        const rr = leerJSON(pathReservas);
+        delete rr[clave];
+        escribirJSON(pathReservas, rr);
+
+        const detalle =
+          (err1?.body && (err1.body.message || err1.body.error || (Array.isArray(err1.body.cause) && err1.body.cause[0]?.description))) ||
+          err1?.message || "Error creando preferencia";
+        return res.status(400).json({ error: detalle });
+      }
+    }
+
+    // 3) Preferencia OK → mapear y persistir
+    const prefId = result?.id || result?.body?.id || result?.response?.id;
+    const initPoint = result?.init_point || result?.body?.init_point || result?.response?.init_point || "";
+
+    // index local: prefId -> { clave, complejoId }
+    const idx = leerJSON(pathIdx);
+    idx[prefId] = { clave, complejoId };
+    escribirJSON(pathIdx, idx);
+
+    // (opcional) enlazar en BD si tenés helper
+    try {
+      if (dao?.setPreferenceIdEnHold && cancha && fecha && hora && prefId) {
+        await dao.setPreferenceIdEnHold({
+          complex_id: complejoId,
+          cancha,
+          fechaISO: fecha,
+          hora,
+          preference_id: prefId
+        });
+      }
+    } catch (e) {
+      console.warn("setPreferenceIdEnHold:", e?.message || e);
+    }
+
+    // actualizar archivo a pending
+    const r2 = leerJSON(pathReservas);
+    if (r2[clave]) {
+      r2[clave] = {
+        ...r2[clave],
+        status: "pending",
+        preference_id: prefId,
+        init_point: initPoint,
+        holdUntil
+      };
+      escribirJSON(pathReservas, r2);
+    }
+
+    return res.json({ preference_id: prefId, init_point: initPoint });
+  } catch (e) {
+    // Excepción general → liberar hold en archivo
+    const rr = leerJSON(pathReservas);
+    delete rr[clave];
+    escribirJSON(pathReservas, rr);
+
+    const detalle =
+      (e?.body && (e.body.message || e.body.error || (Array.isArray(e.body.cause) && e.body.cause[0]?.description))) ||
+      e?.message || "Error creando preferencia";
+    return res.status(400).json({ error: detalle });
+  }
+});
 
   // helper para crear preferencia con el token que toque
   const crearCon = async (accessToken) => {
@@ -1276,6 +1395,21 @@ app.get("/__test-email", async (req, res) => {
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// =======================
+// Listar reservas (para micomplejo.html)
+// =======================
+app.get("/reservas-obj", async (req, res) => {
+  try {
+    // Devuelve todas las reservas existentes de todos los complejos
+    // como un objeto { claveTurno: {status, nombre, telefono, monto, ...} }
+    const obj = await dao.listarReservasObjCompat();
+    res.json(obj);
+  } catch (e) {
+    console.error("/reservas-obj error:", e);
+    res.status(500).json({});
   }
 });
 
