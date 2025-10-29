@@ -1412,6 +1412,50 @@ app.get("/reservas-obj", async (req, res) => {
     res.status(500).json({});
   }
 });
+// =======================
+// Listar reservas desde la DB (para micomplejo.html)
+// =======================
+app.get("/reservas-obj", async (req, res) => {
+  try {
+    // Traigo reservas + nombre de cancha
+    const q = `
+      select
+        r.complex_id,
+        f.name as cancha,
+        to_char(r.fecha,'YYYY-MM-DD') as fecha,
+        to_char(r.hora,'HH24:MI')       as hora,
+        r.status,
+        coalesce(r.nombre,'')   as nombre,
+        coalesce(r.telefono,'') as telefono,
+        coalesce(r.monto,0)     as monto
+      from reservations r
+      join fields f on f.id = r.field_id
+    `;
+    const { rows } = await require('./db').query(q);
+
+    // Helper local: mismo slug que usa el front
+    const slug = (s="") => String(s)
+      .toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/\s+/g,'').replace(/[^a-z0-9]/g,'');
+
+    const out = {};
+    for (const r of rows) {
+      const key = `${r.complex_id}-${slug(r.cancha)}-${r.fecha}-${r.hora}`;
+      out[key] = {
+        status: r.status,
+        nombre: r.nombre,
+        telefono: r.telefono,
+        monto: Number(r.monto)||0
+      };
+    }
+    res.json(out);
+  } catch (e) {
+    console.error("/reservas-obj error:", e);
+    res.status(500).json({});
+  }
+});
+
 
 // =======================
 // Arranque del servidor
