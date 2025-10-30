@@ -762,6 +762,9 @@ app.post("/login", async (req, res) => {
 // PAGOS: crear preferencia (SOLO OAuth)
 // =======================
 
+// =======================
+// Crear preferencia (Mercado Pago) + HOLD
+// =======================
 app.post("/crear-preferencia", async (req, res) => {
   const {
     complejoId,
@@ -809,7 +812,7 @@ app.post("/crear-preferencia", async (req, res) => {
       }
     } catch (e) {
       console.error("DB crear hold:", e?.message || e);
-      // seguimos: también hacemos HOLD en archivo abajo
+      // seguimos igual con HOLD en archivo para compat
     }
   } else if (!claveLegacy) {
     return res.status(400).json({ error: "Faltan cancha/fecha/hora (o clave)" });
@@ -832,7 +835,7 @@ app.post("/crear-preferencia", async (req, res) => {
   };
   escribirJSON(pathReservas, reservas);
 
-  // ===== Helper MercadoPago =====
+  // ===== Helper local para crear preferencia con un token =====
   const crearCon = async (accessToken) => {
     const mp = new MercadoPagoConfig({ accessToken });
     const preference = new Preference(mp);
@@ -861,43 +864,67 @@ app.post("/crear-preferencia", async (req, res) => {
     });
   };
 
+  // ===== Helper para liberar HOLD en archivo (si hubo error) =====
+  const liberarHoldArchivo = () => {
+    const rr = leerJSON(pathReservas);
+    delete rr[clave];
+    escribirJSON(pathReservas, rr);
+  };
+
   try {
-    // 1) Intento con token por complejo (OAuth en DB/archivo)
+    // 1) Token del dueño vía OAuth (DB/archivo)
     let result;
+    let tokenActual;
     try {
-      const tok = await tokenParaAsync(complejoId); // tu helper existente
-      result = await crearCon(tok);
-    } catch (err1) {
-      if (!isInvalidTokenError(err1)) throw err1;
+      tokenActual = await tokenParaAsync(complejoId);
+      result = await crearCon(tokenActual);
+    } catch (errPrimero) {
+      const status = errPrimero?.status || errPrimero?.body?.status;
+      const msg = (errPrimero?.body && (errPrimero.body.message || errPrimero.body.error)) || errPrimero?.message || "";
 
-      // 2) Fallback a otros tokens disponibles (ENV + archivo credenciales)
-      const cred = leerJSON(pathCreds);
-      const candidatos = [
-        process.env.MP_ACCESS_TOKEN,
-        ...Object.values(cred || {}).flatMap(c => [
-          c?.oauth?.access_token,
-          c?.access_token,
-          c?.mp_access_token
-        ]).filter(Boolean)
-      ];
-      let ok = false;
-      for (const t of candidatos) {
-        try { result = await crearCon(t); ok = true; break; } catch (_) {}
-      }
-      if (!ok) {
-        // liberar hold en archivo antes de salir
-        const rr = leerJSON(pathReservas);
-        delete rr[clave];
-        escribirJSON(pathReservas, rr);
+      // 2) Si es token inválido/expired → intentamos refresh
+      if (status === 401 || /invalid_token|expired_token/i.test(msg)) {
+        try {
+          const tokenNuevo = await refreshTokenMP(complejoId);
+          result = await crearCon(tokenNuevo);
+        } catch (errRefresh) {
+          // 3) Fallback a otros tokens disponibles (ENV + archivo credenciales)
+          try {
+            const cred = leerJSON(pathCreds);
+            const candidatos = [
+              process.env.MP_ACCESS_TOKEN,
+              ...Object.values(cred || {}).flatMap(c => [
+                c?.oauth?.access_token,
+                c?.access_token,
+                c?.mp_access_token
+              ]).filter(Boolean)
+            ];
 
+            let ok = false;
+            for (const t of candidatos) {
+              try { result = await crearCon(t); ok = true; break; } catch (_) {}
+            }
+            if (!ok) throw errRefresh;
+          } catch (errFallback) {
+            // liberar hold en archivo y salir con detalle
+            liberarHoldArchivo();
+            const detalle =
+              (errFallback?.body && (errFallback.body.message || errFallback.body.error || (Array.isArray(errFallback.body.cause) && errFallback.body.cause[0]?.description))) ||
+              errFallback?.message || "Error creando preferencia";
+            return res.status(400).json({ error: detalle });
+          }
+        }
+      } else {
+        // Error no recuperable: liberar hold y salir
+        liberarHoldArchivo();
         const detalle =
-          (err1?.body && (err1.body.message || err1.body.error || (Array.isArray(err1.body.cause) && err1.body.cause[0]?.description))) ||
-          err1?.message || "Error creando preferencia";
+          (errPrimero?.body && (errPrimero.body.message || errPrimero.body.error || (Array.isArray(errPrimero.body.cause) && errPrimero.body.cause[0]?.description))) ||
+          errPrimero?.message || "Error creando preferencia";
         return res.status(400).json({ error: detalle });
       }
     }
 
-    // 3) Preferencia OK → mapear y persistir
+    // 4) Preferencia OK → index local y persistencias
     const prefId = result?.id || result?.body?.id || result?.response?.id;
     const initPoint = result?.init_point || result?.body?.init_point || result?.response?.init_point || "";
 
@@ -906,7 +933,7 @@ app.post("/crear-preferencia", async (req, res) => {
     idx[prefId] = { clave, complejoId };
     escribirJSON(pathIdx, idx);
 
-    // (opcional) enlazar en BD si tenés helper
+    // BD: enlazar preference_id al hold (si está disponible)
     try {
       if (dao?.setPreferenceIdEnHold && cancha && fecha && hora && prefId) {
         await dao.setPreferenceIdEnHold({
@@ -921,7 +948,7 @@ app.post("/crear-preferencia", async (req, res) => {
       console.warn("setPreferenceIdEnHold:", e?.message || e);
     }
 
-    // actualizar archivo a pending
+    // Archivo: pasar a pending
     const r2 = leerJSON(pathReservas);
     if (r2[clave]) {
       r2[clave] = {
@@ -937,10 +964,7 @@ app.post("/crear-preferencia", async (req, res) => {
     return res.json({ preference_id: prefId, init_point: initPoint });
   } catch (e) {
     // Excepción general → liberar hold en archivo
-    const rr = leerJSON(pathReservas);
-    delete rr[clave];
-    escribirJSON(pathReservas, rr);
-
+    liberarHoldArchivo();
     const detalle =
       (e?.body && (e.body.message || e.body.error || (Array.isArray(e.body.cause) && e.body.cause[0]?.description))) ||
       e?.message || "Error creando preferencia";
@@ -948,131 +972,10 @@ app.post("/crear-preferencia", async (req, res) => {
   }
 });
 
-  // helper para crear preferencia con el token que toque
-  const crearCon = async (accessToken) => {
-    const mp = new MercadoPagoConfig({ accessToken });
-    const preference = new Preference(mp);
-    return await preference.create({
-      body: {
-        items: [{
-          title: titulo || "Seña de reserva",
-          unit_price: monto,
-          quantity: 1,
-          currency_id: "ARS"
-        }],
-        back_urls: {
-          success: `${process.env.PUBLIC_URL}/reservar-exito.html`,
-          pending: `${process.env.PUBLIC_URL}/reservar-pendiente.html`,
-          failure: `${process.env.PUBLIC_URL}/reservar-error.html`
-        },
-        auto_return: "approved",
-        notification_url: `${process.env.BACKEND_URL}/webhook-mp`,
-        metadata: { clave, complejoId, nombre: nombre || "", telefono: telefono || "" }
-      }
-    });
-  };
-
-  try {
-    // 1) token actual del dueño
-    let tokenActual;
-    try {
-      tokenActual = await tokenParaAsync(complejoId);
-    } catch (e) {
-      // liberar hold en archivo
-      const rr = leerJSON(pathReservas);
-      delete rr[clave];
-      escribirJSON(pathReservas, rr);
-
-      if (e.code === "NO_OAUTH") {
-        return res.status(409).json({
-          error: "Este complejo aún no conectó su Mercado Pago. Pedile al dueño que toque 'Conectar Mercado Pago'."
-        });
-      }
-      return res.status(500).json({ error: "Error obteniendo credenciales del dueño" });
-    }
-
-    // 2) Intento de creación con retry por token vencido
-    let result;
-    try {
-      result = await crearCon(tokenActual);
-    } catch (err) {
-      const status = err?.status || err?.body?.status;
-      const msg = (err?.body && (err.body.message || err.body.error)) || err?.message || "";
-      if (status === 401 || /invalid_token/i.test(msg)) {
-        try {
-          const tokenNuevo = await refreshTokenMP(complejoId);
-          result = await crearCon(tokenNuevo);
-        } catch (err2) {
-          const rr = leerJSON(pathReservas);
-          delete rr[clave];
-          escribirJSON(pathReservas, rr);
-          const detalle2 =
-            (err2?.body && (err2.body.message || err2.body.error || (Array.isArray(err2.body.cause) && err2.body.cause[0]?.description))) ||
-            err2?.message || "Error creando preferencia";
-          return res.status(400).json({ error: detalle2 });
-        }
-      } else {
-        const rr = leerJSON(pathReservas);
-        delete rr[clave];
-        escribirJSON(pathReservas, rr);
-        const detalle =
-          (err?.body && (err.body.message || err.body.error || (Array.isArray(err.body.cause) && err.body.cause[0]?.description))) ||
-          err?.message || "Error creando preferencia";
-        return res.status(400).json({ error: detalle });
-      }
-    }
-
-    // 3) Preferencia OK → indexamos prefId -> clave/complejo y devolvemos
-    const prefId = result?.id || result?.body?.id || result?.response?.id;
-    const initPoint = result?.init_point || result?.body?.init_point || result?.response?.init_point || "";
-
-    const idx = leerJSON(pathIdx);
-    idx[prefId] = { clave, complejoId };
-    escribirJSON(pathIdx, idx);
-
-    // intentar enlazar en BD (si existe helper)
-    try {
-      if (dao?.setPreferenceIdEnHold && cancha && fecha && hora && prefId) {
-        await dao.setPreferenceIdEnHold({
-          complex_id: complejoId,
-          cancha,
-          fechaISO: fecha,
-          hora,
-          preference_id: prefId
-        });
-      }
-    } catch (e) { console.warn("setPreferenceIdEnHold", e?.message || e); }
-
-    const r2 = leerJSON(pathReservas);
-    if (r2[clave]) {
-      r2[clave] = {
-        ...r2[clave],
-        status: "pending",
-        preference_id: prefId,
-        init_point: initPoint,
-        holdUntil
-      };
-      escribirJSON(pathReservas, r2);
-    }
-
-    return res.json({ preference_id: prefId, init_point: initPoint });
-  } catch (e) {
-    // Excepción general → liberar hold en archivo
-    const rr = leerJSON(pathReservas);
-    delete rr[clave];
-    escribirJSON(pathReservas, rr);
-
-    const detalle =
-      (e?.body && (e.body.message || e.body.error || (Array.isArray(e.body.cause) && e.body.cause[0]?.description))) ||
-      e?.message || "Error creando preferencia";
-    return res.status(400).json({ error: detalle });
-  }
-});
 
 // =======================
 // Webhook de Mercado Pago
 // =======================
-
 app.post("/webhook-mp", async (req, res) => {
   try {
     // responder rápido para que MP no reintente de más
@@ -1086,10 +989,10 @@ app.post("/webhook-mp", async (req, res) => {
     const tokensATestar = [];
     const cred = leerJSON(pathCreds);
     if (process.env.MP_ACCESS_TOKEN) tokensATestar.push(process.env.MP_ACCESS_TOKEN);
-    for (const k of Object.keys(cred)) {
+    for (const k of Object.keys(cred || {})) {
       if (cred[k]?.oauth?.access_token) tokensATestar.push(cred[k].oauth.access_token);
-      if (cred[k]?.access_token) tokensATestar.push(cred[k].access_token);
-      if (cred[k]?.mp_access_token) tokensATestar.push(cred[k].mp_access_token);
+      if (cred[k]?.access_token)       tokensATestar.push(cred[k].access_token);
+      if (cred[k]?.mp_access_token)    tokensATestar.push(cred[k].mp_access_token);
     }
 
     let pago = null;
@@ -1174,10 +1077,10 @@ app.post("/webhook-mp", async (req, res) => {
   }
 });
 
+
 // =======================
 // OAuth Mercado Pago: conectar / estado / callback
 // =======================
-
 app.get("/mp/conectar", (req, res) => {
   const { complejoId } = req.query;
   if (!complejoId) return res.status(400).send("Falta complejoId");
@@ -1196,15 +1099,13 @@ app.get("/mp/estado", async (req, res) => {
   const { complejoId } = req.query;
   if (!complejoId) return res.status(400).json({ ok: false, error: "Falta complejoId" });
 
-  // DB primero
   let conectado = false;
   try {
     if (dao?.getMpOAuth) {
       const t = await dao.getMpOAuth(complejoId);
       conectado = !!t?.access_token;
     }
-  } catch { }
-  // Fallback a archivo
+  } catch {}
   if (!conectado) {
     const creds = leerCredsMP_OAUTH();
     conectado = !!creds?.[complejoId]?.oauth?.access_token;
@@ -1215,14 +1116,12 @@ app.get("/mp/estado", async (req, res) => {
 app.get("/mp/callback", async (req, res) => {
   const { code, state: complejoId } = req.query;
   if (!code || !complejoId) {
-    // si vienen mal los params, vuelvo al onboarding con error
     const u = new URL(`${process.env.PUBLIC_URL}/onboarding.html`);
     u.searchParams.set("mp", "error");
     return res.redirect(u.toString());
   }
 
   try {
-    // Intercambio authorization_code → tokens
     const r = await fetch("https://api.mercadopago.com/oauth/token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1237,14 +1136,12 @@ app.get("/mp/callback", async (req, res) => {
     const data = await r.json();
 
     if (!r.ok || !data?.access_token) {
-      // redirijo con error si falló el intercambio
       const u = new URL(`${process.env.PUBLIC_URL}/onboarding.html`);
       u.searchParams.set("complejo", complejoId);
       u.searchParams.set("mp", "error");
       return res.redirect(u.toString());
     }
 
-    // Persisto credenciales OAuth del DUEÑO (DB si está la función)
     try {
       if (dao?.upsertMpOAuth) {
         await dao.upsertMpOAuth({
@@ -1259,7 +1156,6 @@ app.get("/mp/callback", async (req, res) => {
       }
     } catch (e) { console.warn("callback:upsertMpOAuth", e?.message || e); }
 
-    // Archivo (backup)
     const all = leerCredsMP_OAUTH();
     all[complejoId] = all[complejoId] || {};
     all[complejoId].oauth = {
@@ -1274,7 +1170,6 @@ app.get("/mp/callback", async (req, res) => {
     };
     escribirCredsMP_OAUTH(all);
 
-    // Redirijo al onboarding con confirmación
     const ok = new URL(`${process.env.PUBLIC_URL}/onboarding.html`);
     ok.searchParams.set("complejo", complejoId);
     ok.searchParams.set("mp", "ok");
@@ -1289,10 +1184,10 @@ app.get("/mp/callback", async (req, res) => {
   }
 });
 
+
 // =======================
 // Rutas de contacto y notificaciones
 // =======================
-
 app.get('/complejos/:id/contacto', async (req, res) => {
   try {
     const out = await dao.leerContactoComplejo(req.params.id);
@@ -1325,10 +1220,10 @@ app.post('/complejos/:id/notificaciones', async (req, res) => {
   }
 });
 
-// =======================
-// Rutas MP credenciales
-// =======================
 
+// =======================
+// Rutas MP credenciales (legacy manuales si las usás)
+// =======================
 app.post('/complejos/:id/mp/credenciales', async (req, res) => {
   try {
     const saved = await dao.guardarCredencialesMP(req.params.id, req.body || {});
@@ -1349,10 +1244,10 @@ app.get('/complejos/:id/mp/credenciales', async (req, res) => {
   }
 });
 
-// =======================
-// Health checks y testing
-// =======================
 
+// =======================
+// Health checks y datos panel
+// =======================
 app.get("/__health_db", async (_req, res) => {
   try {
     const d = await dao.listarComplejos();
@@ -1362,8 +1257,7 @@ app.get("/__health_db", async (_req, res) => {
   }
 });
 
-// --- Datos para el panel (frontend micomplejo.html) ---
-app.get('/datos_complejos', async (req, res) => {
+app.get('/datos_complejos', async (_req, res) => {
   try {
     const data = await dao.listarComplejos();
     res.json({ ok: true, data });
@@ -1398,32 +1292,19 @@ app.get("/__test-email", async (req, res) => {
   }
 });
 
+
 // =======================
-// Listar reservas (para micomplejo.html)
+// Listar reservas (DB → objeto para micomplejo.html)
+// (Unificado: quitamos el duplicado de /reservas-obj)
 // =======================
-app.get("/reservas-obj", async (req, res) => {
+app.get("/reservas-obj", async (_req, res) => {
   try {
-    // Devuelve todas las reservas existentes de todos los complejos
-    // como un objeto { claveTurno: {status, nombre, telefono, monto, ...} }
-    const obj = await dao.listarReservasObjCompat();
-    res.json(obj);
-  } catch (e) {
-    console.error("/reservas-obj error:", e);
-    res.status(500).json({});
-  }
-});
-// =======================
-// Listar reservas desde la DB (para micomplejo.html)
-// =======================
-app.get("/reservas-obj", async (req, res) => {
-  try {
-    // Traigo reservas + nombre de cancha
     const q = `
       select
         r.complex_id,
         f.name as cancha,
         to_char(r.fecha,'YYYY-MM-DD') as fecha,
-        to_char(r.hora,'HH24:MI')       as hora,
+        to_char(r.hora,'HH24:MI')     as hora,
         r.status,
         coalesce(r.nombre,'')   as nombre,
         coalesce(r.telefono,'') as telefono,
@@ -1433,11 +1314,10 @@ app.get("/reservas-obj", async (req, res) => {
     `;
     const { rows } = await require('./db').query(q);
 
-    // Helper local: mismo slug que usa el front
-    const slug = (s="") => String(s)
+    const slug = (s = "") => String(s)
       .toLowerCase()
       .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-      .replace(/\s+/g,'').replace(/[^a-z0-9]/g,'');
+      .replace(/\s+/g, '').replace(/[^a-z0-9]/g, '');
 
     const out = {};
     for (const r of rows) {
@@ -1446,7 +1326,7 @@ app.get("/reservas-obj", async (req, res) => {
         status: r.status,
         nombre: r.nombre,
         telefono: r.telefono,
-        monto: Number(r.monto)||0
+        monto: Number(r.monto) || 0
       };
     }
     res.json(out);
@@ -1460,7 +1340,6 @@ app.get("/reservas-obj", async (req, res) => {
 // =======================
 // Arranque del servidor
 // =======================
-
 app.listen(PORT, () => {
   console.log(`Server escuchando en http://0.0.0.0:${PORT}`);
 });
