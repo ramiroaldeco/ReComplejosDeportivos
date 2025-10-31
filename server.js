@@ -765,214 +765,101 @@ app.post("/login", async (req, res) => {
 // =======================
 // Crear preferencia (Mercado Pago) + HOLD
 // =======================
+// === Crear preferencia (reserva online) ===
 app.post("/crear-preferencia", async (req, res) => {
-  const {
-    complejoId,
-    // NUEVOS CAMPOS
-    cancha, fecha, hora,
-    // LEGADO
-    clave: claveLegacy,
-    titulo,
-    precio, senia,
-    nombre, telefono
-  } = req.body || {};
-
-  // ===== Validaciones básicas =====
-  const monto = Number(precio ?? senia ?? 0);
-  if (!complejoId || !monto) {
-    return res.status(400).json({ error: "Faltan datos (complejoId/monto)" });
-  }
-
-  // Construir/validar clave de turno
-  let clave = claveLegacy;
-  if (cancha && fecha && hora) {
-    const v = validarTurno({ complejoId, canchaNombre: cancha, fecha, hora });
-    if (!v.ok) return res.status(400).json({ error: v.error });
-    clave = claveDe({ complejoId, canchaNombre: cancha, fecha, hora });
-  }
-  if (!clave) {
-    return res.status(400).json({ error: "Faltan cancha/fecha/hora (o clave)" });
-  }
-
-  // ===== HOLD en BD (si vino turno explícito) =====
-  if (cancha && fecha && hora) {
-    try {
-      const okHold = await dao.crearHold({
-        complex_id: complejoId,
-        cancha,
-        fechaISO: fecha,
-        hora,
-        nombre,
-        telefono,
-        monto,
-        holdMinutes: HOLD_MIN
-      });
-      if (!okHold) {
-        return res.status(409).json({ error: "El turno ya está tomado" });
-      }
-    } catch (e) {
-      console.error("DB crear hold:", e?.message || e);
-      // seguimos igual con HOLD en archivo para compat
-    }
-  } else if (!claveLegacy) {
-    return res.status(400).json({ error: "Faltan cancha/fecha/hora (o clave)" });
-  }
-
-  // ===== HOLD en archivo (compat panel viejo) =====
-  const reservas = leerJSON(pathReservas);
-  const holdUntil = Date.now() + HOLD_MIN * 60 * 1000;
-  reservas[clave] = {
-    ...(reservas[clave] || {}),
-    status: "hold",
-    holdUntil,
-    nombre: nombre || "",
-    telefono: telefono || "",
-    complejoId,
-    monto,
-    cancha: cancha || "",
-    fecha: fecha || "",
-    hora: hora || ""
-  };
-  escribirJSON(pathReservas, reservas);
-
-  // ===== Helper local para crear preferencia con un token =====
-  const crearCon = async (accessToken) => {
-    const mp = new MercadoPagoConfig({ accessToken });
-    const preference = new Preference(mp);
-    return await preference.create({
-      body: {
-        items: [{
-          title: titulo || "Seña de reserva",
-          unit_price: monto,
-          quantity: 1,
-          currency_id: "ARS"
-        }],
-        back_urls: {
-          success: `${process.env.PUBLIC_URL}/reservar-exito.html`,
-          pending: `${process.env.PUBLIC_URL}/reservar-pendiente.html`,
-          failure: `${process.env.PUBLIC_URL}/reservar-error.html`
-        },
-        auto_return: "approved",
-        notification_url: `${process.env.BACKEND_URL}/webhook-mp`,
-        metadata: {
-          clave,
-          complejoId,
-          nombre: nombre || "",
-          telefono: telefono || ""
-        }
-      }
-    });
-  };
-
-  // ===== Helper para liberar HOLD en archivo (si hubo error) =====
-  const liberarHoldArchivo = () => {
-    const rr = leerJSON(pathReservas);
-    delete rr[clave];
-    escribirJSON(pathReservas, rr);
-  };
-
   try {
-    // 1) Token del dueño vía OAuth (DB/archivo)
-    let result;
-    let tokenActual;
-    try {
-      tokenActual = await tokenParaAsync(complejoId);
-      result = await crearCon(tokenActual);
-    } catch (errPrimero) {
-      const status = errPrimero?.status || errPrimero?.body?.status;
-      const msg = (errPrimero?.body && (errPrimero.body.message || errPrimero.body.error)) || errPrimero?.message || "";
+    let {
+      complejoId,
+      cancha,
+      fecha,        // puede venir como 'fecha'
+      fechaISO,     // o como 'fechaISO'
+      hora,
+      titulo,
+      precio, senia,
+      nombre, telefono,
+      clave: claveLegacy,
+      holdMinutes
+    } = req.body || {};
 
-      // 2) Si es token inválido/expired → intentamos refresh
-      if (status === 401 || /invalid_token|expired_token/i.test(msg)) {
-        try {
-          const tokenNuevo = await refreshTokenMP(complejoId);
-          result = await crearCon(tokenNuevo);
-        } catch (errRefresh) {
-          // 3) Fallback a otros tokens disponibles (ENV + archivo credenciales)
-          try {
-            const cred = leerJSON(pathCreds);
-            const candidatos = [
-              process.env.MP_ACCESS_TOKEN,
-              ...Object.values(cred || {}).flatMap(c => [
-                c?.oauth?.access_token,
-                c?.access_token,
-                c?.mp_access_token
-              ]).filter(Boolean)
-            ];
+    // 1) Validaciones básicas
+    const monto = Number(precio ?? senia ?? 0);
+    if (!complejoId) return res.status(400).json({ error: "Falta complejoId" });
+    if (!monto || isNaN(monto) || monto <= 0) return res.status(400).json({ error: "Monto inválido" });
 
-            let ok = false;
-            for (const t of candidatos) {
-              try { result = await crearCon(t); ok = true; break; } catch (_) {}
-            }
-            if (!ok) throw errRefresh;
-          } catch (errFallback) {
-            // liberar hold en archivo y salir con detalle
-            liberarHoldArchivo();
-            const detalle =
-              (errFallback?.body && (errFallback.body.message || errFallback.body.error || (Array.isArray(errFallback.body.cause) && errFallback.body.cause[0]?.description))) ||
-              errFallback?.message || "Error creando preferencia";
-            return res.status(400).json({ error: detalle });
-          }
-        }
-      } else {
-        // Error no recuperable: liberar hold y salir
-        liberarHoldArchivo();
-        const detalle =
-          (errPrimero?.body && (errPrimero.body.message || errPrimero.body.error || (Array.isArray(errPrimero.body.cause) && errPrimero.body.cause[0]?.description))) ||
-          errPrimero?.message || "Error creando preferencia";
-        return res.status(400).json({ error: detalle });
-      }
+    // 2) Normalizaciones
+    complejoId = String(complejoId).trim();
+    nombre = (nombre || "").trim();
+    telefono = (telefono || "").trim();
+
+    // 3) Resolver fecha/hora (acepto ambos nombres + intento legacy)
+    let fISO = (fechaISO || fecha || "").trim();
+    let hHM  = (hora || "").trim();
+
+    if ((!/^\d{4}-\d{2}-\d{2}$/.test(fISO) || !/^\d{2}:\d{2}$/.test(hHM)) && claveLegacy) {
+      const m = String(claveLegacy).match(/-(\d{4}-\d{2}-\d{2})-(\d{2}:\d{2})$/);
+      if (m) { fISO = fISO || m[1]; hHM = hHM || m[2]; }
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(fISO)) return res.status(400).json({ error: "Fecha inválida (YYYY-MM-DD)" });
+    if (!/^\d{2}:\d{2}$/.test(hHM))        return res.status(400).json({ error: "Hora inválida (HH:MM)" });
+
+    // 4) Verificar complejo (tolerante)
+    const info = await dao.getComplejo(complejoId);
+    if (!info) return res.status(400).json({ error: "Complejo inexistente" });
+
+    // 5) Crear HOLD (bloqueo del turno)
+    const holdOk = await dao.crearHold({
+      complex_id: complejoId,
+      cancha,                 // nombre visible; DB lo resuelve contra fields
+      fechaISO: fISO,
+      hora: hHM,
+      nombre, telefono,
+      monto,
+      holdMinutes: Number(holdMinutes) || 10
+    });
+    if (!holdOk) return res.status(400).json({ error: "Cancha inexistente o turno inválido" });
+
+    // 6) Preferencia MP (si no hay token, devolvemos dummy para testear)
+    const creds = await dao.leerCredencialesMP(complejoId).catch(()=>null);
+    const accessToken = creds?.mp_access_token || process.env.MP_ACCESS_TOKEN || null;
+
+    if (!accessToken) {
+      return res.json({ init_point: `https://example.com/pago-simulado?ok=1&m=${monto}&t=${Date.now()}` });
     }
 
-    // 4) Preferencia OK → index local y persistencias
-    const prefId = result?.id || result?.body?.id || result?.response?.id;
-    const initPoint = result?.init_point || result?.body?.init_point || result?.response?.init_point || "";
+    const prefBody = {
+      items: [{ title: titulo || `Seña ${cancha}`, quantity: 1, currency_id: "ARS", unit_price: Number(monto) }],
+      payer: { name: nombre || "Cliente", phone: { number: telefono || "" } },
+      metadata: { complejoId, cancha, fecha: fISO, hora: hHM },
+      back_urls: {
+        success: "https://ramiroaldeco.github.io/recomplejos-frontend/reservar-exito.html",
+        pending: "https://ramiroaldeco.github.io/recomplejos-frontend/reservar-pendiente.html",
+        failure: "https://ramiroaldeco.github.io/recomplejos-frontend/reservar-error.html"
+      },
+      auto_return: "approved"
+    };
 
-    // index local: prefId -> { clave, complejoId }
-    const idx = leerJSON(pathIdx);
-    idx[prefId] = { clave, complejoId };
-    escribirJSON(pathIdx, idx);
+    const mpRes = await fetch("https://api.mercadopago.com/checkout/preferences", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify(prefBody)
+    });
 
-    // BD: enlazar preference_id al hold (si está disponible)
-    try {
-      if (dao?.setPreferenceIdEnHold && cancha && fecha && hora && prefId) {
-        await dao.setPreferenceIdEnHold({
-          complex_id: complejoId,
-          cancha,
-          fechaISO: fecha,
-          hora,
-          preference_id: prefId
-        });
-      }
-    } catch (e) {
-      console.warn("setPreferenceIdEnHold:", e?.message || e);
+    if (!mpRes.ok) {
+      const txt = await mpRes.text().catch(()=> "");
+      console.error("MP error:", mpRes.status, txt);
+      return res.status(502).json({ error: "MercadoPago no disponible" });
     }
 
-    // Archivo: pasar a pending
-    const r2 = leerJSON(pathReservas);
-    if (r2[clave]) {
-      r2[clave] = {
-        ...r2[clave],
-        status: "pending",
-        preference_id: prefId,
-        init_point: initPoint,
-        holdUntil
-      };
-      escribirJSON(pathReservas, r2);
-    }
+    const pref = await mpRes.json();
+    const init_point = pref.init_point || pref.sandbox_init_point;
+    if (!init_point) return res.status(502).json({ error: "Preferencia creada sin init_point" });
 
-    return res.json({ preference_id: prefId, init_point: initPoint });
+    return res.json({ init_point });
   } catch (e) {
-    // Excepción general → liberar hold en archivo
-    liberarHoldArchivo();
-    const detalle =
-      (e?.body && (e.body.message || e.body.error || (Array.isArray(e.body.cause) && e.body.cause[0]?.description))) ||
-      e?.message || "Error creando preferencia";
-    return res.status(400).json({ error: detalle });
+    console.error("ERROR /crear-preferencia:", e);
+    return res.status(500).json({ error: "Error interno" });
   }
 });
-
-
 // =======================
 // Webhook de Mercado Pago
 // =======================
