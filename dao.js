@@ -1,4 +1,4 @@
-// dao.js — versión saneada (fix ON CONFLICT sobre índice parcial `uniq_turno`)
+// dao.js — versión saneada (fix ON CONFLICT y getComplejo tolerante)
 const pool = require('./db');
 // const bcrypt = require('bcrypt'); // si después migrás login a hash, descomentá
 
@@ -75,6 +75,18 @@ async function listarComplejos() {
   }
 
   return out;
+}
+
+// ✅ Devuelve el complejo por ID (tolerante a mayúsculas/espacios)
+async function getComplejo(id) {
+  const { rows } = await pool.query(
+    `select *
+       from complexes
+      where lower(trim(id)) = lower(trim($1))
+      limit 1`,
+    [String(id || "").trim()]
+  );
+  return rows[0] || null;
 }
 
 // Upsert masivo del objeto “merged” que manda onboarding.html
@@ -172,7 +184,7 @@ async function loginDueno(complejoId, password) {
 
 /* ===================== RESERVAS (compat objeto) ===================== */
 
-// reservations → objeto clave legacy (usamos SLUG de cancha para que coincida con el front)
+// reservations → objeto clave ISO (usa SLUG de cancha)
 async function listarReservasObjCompat() {
   const { rows } = await pool.query(`
     select r.*, f.name as cancha
@@ -202,7 +214,10 @@ async function listarReservasObjCompat() {
   return out;
 }
 
-// ⚠️ Borra TODO y recrea desde el objeto (útil para import masivo; peligroso si hay varios complejos)
+// alias por compatibilidad (el servidor puede llamar a cualquiera)
+const listarReservasMapa = listarReservasObjCompat;
+
+// ⚠️ Borra TODO y recrea desde el objeto (útil para import masivo)
 async function guardarReservasObjCompat(obj) {
   const client = await pool.connect();
   try {
@@ -290,7 +305,6 @@ async function crearHold({ complex_id, cancha, fechaISO, hora, nombre, telefono,
 
   return ins.rowCount > 0;
 }
-
 
 async function actualizarReservaTrasPago({ preference_id, payment_id, status, nombre, telefono }) {
   const { rowCount } = await pool.query(`
@@ -435,38 +449,39 @@ async function insertarReservaManual({ complex_id, cancha, fechaISO, hora, nombr
   if (!f.rowCount) throw new Error("Cancha no encontrada");
   const field_id = f.rows[0].id;
 
- // ✅ versión robusta: usa las columnas en lugar del nombre del constraint
-await pool.query(`
-  insert into reservations (complex_id, field_id, fecha, hora, status, nombre, telefono, monto)
-  values ($1,$2,$3,$4,'manual',$5,$6,$7)
-  on conflict (complex_id, field_id, fecha, hora)
-  do update set
-    status = 'manual',
-    nombre = excluded.nombre,
-    telefono = excluded.telefono,
-    monto = excluded.monto,
-    hold_until = null
-`, [complex_id, field_id, fechaISO, hora, nombre || null, telefono || null, monto || null]);
-
+  // ✅ versión robusta: usa las columnas en lugar del nombre del constraint
+  await pool.query(`
+    insert into reservations (complex_id, field_id, fecha, hora, status, nombre, telefono, monto)
+    values ($1,$2,$3,$4,'manual',$5,$6,$7)
+    on conflict (complex_id, field_id, fecha, hora)
+    do update set
+      status = 'manual',
+      nombre = excluded.nombre,
+      telefono = excluded.telefono,
+      monto = excluded.monto,
+      hold_until = null
+  `, [complex_id, field_id, fechaISO, hora, nombre || null, telefono || null, monto || null]);
 
   return { ok: true };
 }
 
-/* ===================== EXPORTS ÚNICOS ===================== */
+/* ===================== EXPORTS ===================== */
 
 module.exports = {
   // === Complejos y datos base ===
   listarComplejos,
+  getComplejo,
   guardarDatosComplejos,
   loginDueno,
 
   // === Reservas ===
   listarReservasObjCompat,
+  listarReservasMapa,        // alias
   guardarReservasObjCompat,
   crearHold,
   actualizarReservaTrasPago,
-  insertarReservaManual,      // <- la que usa el servidor
-  reservarManualDB: insertarReservaManual, // alias opcional
+  insertarReservaManual,
+  reservarManualDB: insertarReservaManual, // alias
 
   // === MP OAuth ===
   upsertMpOAuth,
