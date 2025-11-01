@@ -806,17 +806,17 @@ app.post("/crear-preferencia", async (req, res) => {
     const info = await dao.getComplejo(complejoId);
     if (!info) return res.status(400).json({ error: "Complejo inexistente" });
 
-    // 5) Crear HOLD (bloqueo del turno)
-    const holdOk = await dao.crearHold({
-      complex_id: complejoId,
-      cancha,                 // nombre visible; DB lo resuelve contra fields
-      fechaISO: fISO,
-      hora: hHM,
-      nombre, telefono,
-      monto,
-      holdMinutes: Number(holdMinutes) || 10
-    });
-    if (!holdOk) return res.status(400).json({ error: "Cancha inexistente o turno inválido" });
+    // 5) Crear HOLD (bloqueo del turno
+    //const holdOk = await dao.crearHold({
+      //complex_id: complejoId,
+      //cancha,                 // nombre visible; DB lo resuelve contra fields
+      //fechaISO: fISO,
+      //hora: hHM,
+      //nombre, telefono,
+      //monto,
+      //holdMinutes: Number(holdMinutes) || 10
+    //});
+    //if (!holdOk) return res.status(400).json({ error: "Cancha inexistente o turno inválido" });
 
    // 6) Preferencia MP - busca token en mp_oauth o en complexes o en variable
 let accessToken = null;
@@ -978,6 +978,22 @@ app.post("/webhook-mp",
         console.warn("[webhook-mp] Sin preference_id en pago:", pago?.id);
         // igual seguimos actualizando por payment_id si tu DAO lo permite
       }
+// Si el pago fue aprobado, crear la reserva real
+if (status === 'approved') {
+  try {
+    await dao.insertarReservaManual({
+      complex_id: complejoId,
+      cancha,
+      fechaISO: pago?.metadata?.fecha || pago?.metadata?.fechaISO,
+      hora: pago?.metadata?.hora,
+      nombre: pago?.metadata?.nombre,
+      telefono: pago?.metadata?.telefono,
+      monto: pago?.transaction_amount
+    });
+  } catch (e) {
+    console.error("Error creando reserva tras pago aprobado:", e);
+  }
+}
 
       // 5) Actualizar en la BD (levanta hold y marca estado real)
       try {
