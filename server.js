@@ -881,108 +881,157 @@ if (!accessToken) {
 // =======================
 // Webhook de Mercado Pago
 // =======================
-app.post("/webhook-mp", async (req, res) => {
-  try {
-    // responder rápido para que MP no reintente de más
-    res.sendStatus(200);
-
-    const body = req.body || {};
-    const paymentId = body?.data?.id || body?.id;
-    if (!paymentId) return;
-
-    // buscamos el pago consultando con cualquier token válido que tengamos
-    const tokensATestar = [];
-    const cred = leerJSON(pathCreds);
-    if (process.env.MP_ACCESS_TOKEN) tokensATestar.push(process.env.MP_ACCESS_TOKEN);
-    for (const k of Object.keys(cred || {})) {
-      if (cred[k]?.oauth?.access_token) tokensATestar.push(cred[k].oauth.access_token);
-      if (cred[k]?.access_token)       tokensATestar.push(cred[k].access_token);
-      if (cred[k]?.mp_access_token)    tokensATestar.push(cred[k].mp_access_token);
-    }
-
-    let pago = null;
-    for (const t of tokensATestar) {
-      try {
-        if (!t) continue;
-        const r = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
-          headers: { Authorization: `Bearer ${t}` }
-        });
-        if (r.ok) { pago = await r.json(); break; }
-      } catch { /* seguir probando */ }
-    }
-    if (!pago) return;
-
-    const prefId = pago?.order?.id || pago?.preference_id || pago?.metadata?.preference_id;
-    const status = pago?.status; // approved | pending | rejected | in_process | cancelled
-
-    // localizar clave/complejo por metadata o índice pref -> clave
-    let clave = pago?.metadata?.clave;
-    let complejoId = pago?.metadata?.complejoId;
-    if ((!clave || !complejoId) && prefId) {
-      const idx = leerJSON(pathIdx);
-      clave = clave || idx[prefId]?.clave;
-      complejoId = complejoId || idx[prefId]?.complejoId;
-    }
-    if (!clave) return;
-
-    // actualizar BD (si está disponible)
+// Aceptamos JSON y también texto plano (MP a veces varía el header)
+app.post("/webhook-mp",
+  express.json({ type: ['application/json', 'text/plain', 'application/*+json'] }),
+  async (req, res) => {
     try {
-      await dao.actualizarReservaTrasPago({
-        preference_id: prefId,
-        payment_id: pago?.id,
-        status,
-        nombre: pago?.metadata?.nombre || null,
-        telefono: pago?.metadata?.telefono || null
-      });
+      // Responder rápido para evitar reintentos excesivos
+      res.sendStatus(200);
+
+      // 1) Extraer paymentId (MP puede mandarlo en body o query)
+      const body = (typeof req.body === 'string') ? JSON.parse(req.body || '{}') : (req.body || {});
+      const paymentId =
+        body?.data?.id ||
+        body?.id ||
+        req.query?.['data.id'] ||
+        req.query?.id;
+
+      if (!paymentId) {
+        console.warn("[webhook-mp] Sin paymentId en body/query:", body, req.query);
+        return;
+      }
+
+      // 2) Conseguir un access_token válido (DB mp_oauth -> complexes -> env)
+      const tokensATestar = new Set();
+
+      // a) .env
+      if (process.env.MP_ACCESS_TOKEN) tokensATestar.add(process.env.MP_ACCESS_TOKEN);
+
+      // b) DB mp_oauth (todos los tokens disponibles)
+      try {
+        // si ya tenés un dao que liste tokens, usalo; si no, agregá uno simple
+        // getAllMpTokens debe devolver array de {access_token}
+        if (dao.getAllMpTokens) {
+          const toks = await dao.getAllMpTokens();
+          (toks || []).forEach(t => t?.access_token && tokensATestar.add(t.access_token));
+        }
+      } catch (e) {
+        console.warn("[webhook-mp] No se pudieron leer tokens de mp_oauth:", e?.message || e);
+      }
+
+      // c) Tabla complexes (compatibilidad)
+      try {
+        if (dao.getAllComplexTokens) {
+          const toks2 = await dao.getAllComplexTokens();
+          (toks2 || []).forEach(t => t?.mp_access_token && tokensATestar.add(t.mp_access_token));
+        }
+      } catch (e) {
+        console.warn("[webhook-mp] No se pudieron leer tokens de complexes:", e?.message || e);
+      }
+
+      // d) (Opcional) archivos locales – si aún los usás
+      try {
+        const cred = leerJSON?.(pathCreds);
+        for (const k of Object.keys(cred || {})) {
+          if (cred[k]?.oauth?.access_token) tokensATestar.add(cred[k].oauth.access_token);
+          if (cred[k]?.access_token)       tokensATestar.add(cred[k].access_token);
+          if (cred[k]?.mp_access_token)    tokensATestar.add(cred[k].mp_access_token);
+        }
+      } catch {}
+
+      if (tokensATestar.size === 0) {
+        console.error("[webhook-mp] No hay tokens para consultar el pago.");
+        return;
+      }
+
+      // 3) Consultar el pago en MP con el primer token que funcione
+      let pago = null;
+      for (const t of tokensATestar) {
+        try {
+          const r = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
+            headers: { Authorization: `Bearer ${t}` }
+          });
+          if (r.ok) { pago = await r.json(); break; }
+        } catch { /* probar con otro token */ }
+      }
+      if (!pago) {
+        console.error("[webhook-mp] No se pudo obtener el pago en MP:", paymentId);
+        return;
+      }
+
+      const prefId  = pago?.order?.id || pago?.preference_id || pago?.metadata?.preference_id || null;
+      const status  = pago?.status; // approved | pending | rejected | in_process | cancelled
+      let   clave   = pago?.metadata?.clave || null;
+      let   complejoId = pago?.metadata?.complejoId || null;
+
+      // 4) Si no vino la clave/complejo en metadata, buscarla por índice prefId -> clave (compat local)
+      if ((!clave || !complejoId) && prefId && typeof leerJSON === 'function') {
+        try {
+          const idx = leerJSON(pathIdx);
+          if (!clave)       clave      = idx?.[prefId]?.clave || null;
+          if (!complejoId)  complejoId = idx?.[prefId]?.complejoId || null;
+        } catch {}
+      }
+
+      if (!prefId) {
+        console.warn("[webhook-mp] Sin preference_id en pago:", pago?.id);
+        // igual seguimos actualizando por payment_id si tu DAO lo permite
+      }
+
+      // 5) Actualizar en la BD (levanta hold y marca estado real)
+      try {
+        await dao.actualizarReservaTrasPago({
+          preference_id: prefId,
+          payment_id: String(pago?.id || paymentId),
+          status,
+          nombre:   pago?.metadata?.nombre   || null,
+          telefono: pago?.metadata?.telefono || null
+        });
+      } catch (e) {
+        console.error("[webhook-mp] DB actualizarReservaTrasPago:", e?.message || e);
+      }
+
+      // 6) (Compat) mantener espejo en archivo local si todavía lo usás
+      try {
+        if (typeof leerJSON === 'function' && typeof escribirJSON === 'function' && clave) {
+          const reservas = leerJSON(pathReservas) || {};
+          const r = reservas[clave] || {};
+          r.preference_id = prefId || r.preference_id;
+          r.payment_id    = pago?.id || r.payment_id;
+
+          if (status === "approved") {
+            r.status   = "approved";
+            r.paidAt   = Date.now();
+            r.nombre   = r.nombre   || pago?.metadata?.nombre   || "";
+            r.telefono = r.telefono || pago?.metadata?.telefono || "";
+            r.complejoId = r.complejoId || complejoId || "";
+            delete r.holdUntil;
+            await notificarAprobado?.({
+              clave,
+              complejoId: r.complejoId,
+              nombre: r.nombre,
+              telefono: r.telefono,
+              monto: r.monto || r.precio || r.senia || ""
+            });
+          } else if (status === "rejected" || status === "cancelled") {
+            delete reservas[clave]; // libera
+            escribirJSON(pathReservas, reservas);
+            return;
+          } else {
+            r.status = "pending"; // in_process / pending
+          }
+          escribirJSON(pathReservas, { ...reservas, [clave]: r });
+        }
+      } catch (e) {
+        console.warn("[webhook-mp] espejo local:", e?.message || e);
+      }
     } catch (e) {
-      console.error("DB actualizar tras pago:", e);
+      console.error("Error en webhook:", e?.message || e);
+      // ya respondimos 200 arriba para evitar reintentos
     }
-
-    // mantener compat en archivo local
-    const reservas = leerJSON(pathReservas);
-    const r = reservas[clave] || {};
-    r.preference_id = prefId || r.preference_id;
-    r.payment_id = pago?.id || r.payment_id;
-
-    if (status === "approved") {
-      r.status = "approved";
-      r.paidAt = Date.now();
-      r.nombre = r.nombre || pago?.metadata?.nombre || "";
-      r.telefono = r.telefono || pago?.metadata?.telefono || "";
-      r.complejoId = r.complejoId || complejoId || "";
-
-      escribirJSON(pathReservas, { ...reservas, [clave]: r });
-
-      // 📧 Enviar email al dueño
-      const infoNoti = {
-        clave,
-        complejoId: r.complejoId,
-        nombre: r.nombre,
-        telefono: r.telefono,
-        monto: r.monto || r.precio || r.senia || ""
-      };
-      await notificarAprobado(infoNoti);
-
-      delete r.holdUntil;
-
-    } else if (status === "rejected" || status === "cancelled") {
-      delete reservas[clave];
-      escribirJSON(pathReservas, reservas);
-      return;
-
-    } else {
-      r.status = "pending"; // in_process / pending
-      escribirJSON(pathReservas, { ...reservas, [clave]: r });
-      return;
-    }
-
-    escribirJSON(pathReservas, { ...reservas, [clave]: r });
-  } catch (e) {
-    console.error("Error en webhook:", e?.message || e);
   }
-});
-
-
+);
 // =======================
 // OAuth Mercado Pago: conectar / estado / callback
 // =======================
