@@ -818,14 +818,32 @@ app.post("/crear-preferencia", async (req, res) => {
     });
     if (!holdOk) return res.status(400).json({ error: "Cancha inexistente o turno inválido" });
 
-    // 6) Preferencia MP (si no hay token, devolvemos dummy para testear)
-    const creds = await dao.leerCredencialesMP(complejoId).catch(()=>null);
-    const accessToken = creds?.mp_access_token || process.env.MP_ACCESS_TOKEN || null;
+   // 6) Preferencia MP - busca token en mp_oauth o en complexes o en variable
+let accessToken = null;
 
-    if (!accessToken) {
-      return res.json({ init_point: `https://example.com/pago-simulado?ok=1&m=${monto}&t=${Date.now()}` });
-    }
+// prioridad 1: tabla mp_oauth (tokens reales)
+try {
+  const creds = await dao.getMpOAuth(complejoId);
+  if (creds?.access_token) accessToken = creds.access_token;
+} catch (_) {}
 
+// prioridad 2: tabla complexes (por compatibilidad)
+if (!accessToken) {
+  try {
+    const creds2 = await dao.leerCredencialesMP(complejoId);
+    if (creds2?.mp_access_token) accessToken = creds2.mp_access_token;
+  } catch (_) {}
+}
+
+// prioridad 3: variable de entorno
+if (!accessToken) accessToken = process.env.MP_ACCESS_TOKEN || null;
+
+// si no hay token => error claro
+if (!accessToken) {
+  return res.status(400).json({
+    error: `MercadoPago no configurado: no se encontró access_token para el complejo ${complejoId}`
+  });
+}
     const prefBody = {
       items: [{ title: titulo || `Seña ${cancha}`, quantity: 1, currency_id: "ARS", unit_price: Number(monto) }],
       payer: { name: nombre || "Cliente", phone: { number: telefono || "" } },
