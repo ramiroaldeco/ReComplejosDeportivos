@@ -1,6 +1,5 @@
-// dao.js — versión saneada (fix ON CONFLICT y getComplejo tolerante)
+// dao.js — versión saneada + normalización JSON (servicios/imagenes)
 const pool = require('./db');
-// const bcrypt = require('bcrypt'); // si después migrás login a hash, descomentá
 
 /* ===================== Helpers ===================== */
 
@@ -11,6 +10,40 @@ function hhmm(x) { return String(x || "").slice(0, 5); }
 function ymd(d) {
   try { return (d instanceof Date ? d : new Date(d)).toISOString().slice(0, 10); }
   catch { return String(d || "").slice(0, 10); }
+}
+
+/* ---- Normalizadores para JSON y strings ---- */
+function toJsonArray(x) {
+  // Acepta: array real, JSON string, "{A,B}" o {"A","B"} estilo PG, y string con separadores , ; |
+  if (Array.isArray(x)) return x.filter(v => v != null).map(String);
+  if (x == null) return [];
+  if (typeof x === 'object') return Object.values(x).map(String);
+
+  let s = String(x).trim();
+  if (!s) return [];
+
+  // Si parece JSON array
+  if (s.startsWith('[')) {
+    try { const arr = JSON.parse(s); return Array.isArray(arr) ? arr.map(String) : []; } catch {}
+  }
+
+  // Estilo Postgres array: {A,B} o {"A","B"}
+  if (s.startsWith('{') && s.endsWith('}')) {
+    s = s.slice(1, -1);
+    const parts = s.match(/"([^"]+)"|[^,]+/g) || [];
+    return parts
+      .map(t => t.replace(/^"(.*)"$/, '$1').trim())
+      .filter(Boolean);
+  }
+
+  // Texto plano con separadores comunes
+  return s.split(/[;,|]/g).map(t => t.trim()).filter(Boolean);
+}
+
+function toStringOrNull(x) {
+  if (x == null) return null;
+  if (typeof x === 'string') return x;
+  try { return String(x); } catch { return null; }
 }
 
 /* ===================== COMPLEJOS ===================== */
@@ -99,6 +132,12 @@ async function guardarDatosComplejos(merged) {
     for (const id of Object.keys(merged || {})) {
       const d = merged[id] || {};
 
+      // Normalizar entradas antes de escribir
+      const servicios = toJsonArray(d.servicios);
+      const imagenes  = toJsonArray(d.imagenes);
+      const maps_iframe = toStringOrNull(d.maps || d.maps_iframe);
+      const horariosObj = (d.horarios && typeof d.horarios === 'object') ? d.horarios : {};
+
       // complexes
       await client.query(`
         insert into complexes (id, name, city, maps_iframe, servicios, imagenes, clave_legacy)
@@ -114,44 +153,42 @@ async function guardarDatosComplejos(merged) {
         id,
         d.nombre || id,
         d.ciudad || null,
-        d.maps || d.maps_iframe || null,
-        d.servicios || [],
-        d.imagenes || [],
+        maps_iframe,
+        servicios,
+        imagenes,
         d.clave || null
       ]);
 
       // schedules (replace 7 días)
-      if (d.horarios && typeof d.horarios === 'object') {
-        await client.query(`delete from schedules where complex_id=$1`, [id]);
-        const orden = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"];
-        const map = { "Domingo":0,"Lunes":1,"Martes":2,"Miércoles":3,"Jueves":4,"Viernes":5,"Sábado":6 };
-        for (const nd of orden) {
-          const h = d.horarios[nd] || {};
-          const desde = h.desde || '18:00';
-          const hasta = h.hasta || '23:00';
-          await client.query(
-            `insert into schedules (complex_id, day_of_week, desde, hasta)
-             values ($1,$2,$3,$4)`,
-            [id, map[nd], desde, hasta]
-          );
-        }
+      await client.query(`delete from schedules where complex_id=$1`, [id]);
+      const orden = ["Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"];
+      const map = { "Domingo":0,"Lunes":1,"Martes":2,"Miércoles":3,"Jueves":4,"Viernes":5,"Sábado":6 };
+      for (const nd of orden) {
+        const h = horariosObj[nd] || {};
+        const desde = String(h.desde || '18:00').slice(0,5);
+        const hasta = String(h.hasta || '23:00').slice(0,5);
+        await client.query(
+          `insert into schedules (complex_id, day_of_week, desde, hasta)
+           values ($1,$2,$3,$4)`,
+          [id, map[nd], desde, hasta]
+        );
       }
 
       // fields (replace)
       if (Array.isArray(d.canchas)) {
         await client.query(`delete from fields where complex_id=$1`, [id]);
         for (const c of d.canchas) {
-          const jug = Number(c.jugadores ?? 0);
+          const jug = Number(c?.jugadores ?? 0) || 0;
           const precioPP =
-            c.precioPP != null ? Number(c.precioPP) :
-            c.precioPorJugador != null ? Number(c.precioPorJugador) :
-            (c.precioTotal != null && jug) ? Number(c.precioTotal) / jug : 0;
-          const senia = Number(c.senia ?? 0);
+            c?.precioPP != null ? Number(c.precioPP) :
+            c?.precioPorJugador != null ? Number(c.precioPorJugador) :
+            (c?.precioTotal != null && jug) ? Number(c.precioTotal) / jug : 0;
+          const senia = Number(c?.senia ?? 0) || 0;
 
           await client.query(
             `insert into fields (complex_id, name, jugadores, precio_pp, senia)
              values ($1,$2,$3,$4,$5)`,
-            [id, c.nombre || 'Cancha', jug, precioPP, senia]
+            [id, (c?.nombre || 'Cancha'), jug, precioPP, senia]
           );
         }
       }
@@ -289,7 +326,7 @@ async function crearHold({ complex_id, cancha, fechaISO, hora, nombre, telefono,
   if (!rows.length) return false;
   const field_id = rows[0].id;
 
-  // ✅ Inserta HOLD y evita duplicados por columnas (no depende del nombre uniq_turno)
+  // Inserta HOLD y evita duplicados por columnas
   const ins = await pool.query(`
     insert into reservations (complex_id, field_id, fecha, hora, status, nombre, telefono, monto, hold_until)
     values ($1,$2,$3,$4,'hold',$5,$6,$7, now() + ($8 || ' minutes')::interval)
@@ -449,7 +486,7 @@ async function insertarReservaManual({ complex_id, cancha, fechaISO, hora, nombr
   if (!f.rowCount) throw new Error("Cancha no encontrada");
   const field_id = f.rows[0].id;
 
-  // ✅ versión robusta: usa las columnas en lugar del nombre del constraint
+  // versión robusta: usa las columnas en lugar del nombre del constraint
   await pool.query(`
     insert into reservations (complex_id, field_id, fecha, hora, status, nombre, telefono, monto)
     values ($1,$2,$3,$4,'manual',$5,$6,$7)
