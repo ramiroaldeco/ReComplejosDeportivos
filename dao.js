@@ -74,8 +74,9 @@ async function listarComplejos() {
       nombre: c.name,
       ciudad: c.city,
       maps: c.maps_iframe,
-      servicios: Array.isArray(c.servicios) ? c.servicios : (c.servicios ?? []),
-      imagenes: Array.isArray(c.imagenes) ? c.imagenes : (c.imagenes ?? []),
+      // Si viniera como string/pg-array, seguimos mostrando arrays
+      servicios: Array.isArray(c.servicios) ? c.servicios : toJsonArray(c.servicios),
+      imagenes:  Array.isArray(c.imagenes)  ? c.imagenes  : toJsonArray(c.imagenes),
       canchas: [],
       horarios: {}
     };
@@ -138,10 +139,10 @@ async function guardarDatosComplejos(merged) {
       const maps_iframe = toStringOrNull(d.maps || d.maps_iframe);
       const horariosObj = (d.horarios && typeof d.horarios === 'object') ? d.horarios : {};
 
-      // complexes
+      // complexes  ⬅️  FIX: stringify + ::jsonb para evitar 22P02
       await client.query(`
         insert into complexes (id, name, city, maps_iframe, servicios, imagenes, clave_legacy)
-        values ($1,$2,$3,$4,$5,$6,$7)
+        values ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7)
         on conflict (id) do update set
           name=excluded.name,
           city=excluded.city,
@@ -154,8 +155,8 @@ async function guardarDatosComplejos(merged) {
         d.nombre || id,
         d.ciudad || null,
         maps_iframe,
-        servicios,
-        imagenes,
+        JSON.stringify(servicios),
+        JSON.stringify(imagenes),
         d.clave || null
       ]);
 
