@@ -882,7 +882,8 @@ if (!accessToken) {
 // Webhook de Mercado Pago
 // =======================
 // Aceptamos JSON y también texto plano (MP a veces varía el header)
-app.post("/webhook-mp",
+app.post(
+  "/webhook-mp",
   express.json({ type: ['application/json', 'text/plain', 'application/*+json'] }),
   async (req, res) => {
     try {
@@ -908,10 +909,8 @@ app.post("/webhook-mp",
       // a) .env
       if (process.env.MP_ACCESS_TOKEN) tokensATestar.add(process.env.MP_ACCESS_TOKEN);
 
-      // b) DB mp_oauth (todos los tokens disponibles)
+      // b) DB mp_oauth (si tenés helper en dao)
       try {
-        // si ya tenés un dao que liste tokens, usalo; si no, agregá uno simple
-        // getAllMpTokens debe devolver array de {access_token}
         if (dao.getAllMpTokens) {
           const toks = await dao.getAllMpTokens();
           (toks || []).forEach(t => t?.access_token && tokensATestar.add(t.access_token));
@@ -960,9 +959,9 @@ app.post("/webhook-mp",
         return;
       }
 
-      const prefId  = pago?.order?.id || pago?.preference_id || pago?.metadata?.preference_id || null;
-      const status  = pago?.status; // approved | pending | rejected | in_process | cancelled
-      let   clave   = pago?.metadata?.clave || null;
+      const prefId     = pago?.order?.id || pago?.preference_id || pago?.metadata?.preference_id || null;
+      const status     = pago?.status; // approved | pending | rejected | in_process | cancelled
+      let   clave      = pago?.metadata?.clave || null;
       let   complejoId = pago?.metadata?.complejoId || null;
 
       // 4) Si no vino la clave/complejo en metadata, buscarla por índice prefId -> clave (compat local)
@@ -976,26 +975,27 @@ app.post("/webhook-mp",
 
       if (!prefId) {
         console.warn("[webhook-mp] Sin preference_id en pago:", pago?.id);
-        // igual seguimos actualizando por payment_id si tu DAO lo permite
+        // igual seguimos actualizando por payment_id más abajo
       }
-// Si el pago fue aprobado, crear la reserva real
-if (status === 'approved') {
-  try {
-    await dao.insertarReservaManual({
-      complex_id: complejoId,
-      cancha,
-      fechaISO: pago?.metadata?.fecha || pago?.metadata?.fechaISO,
-      hora: pago?.metadata?.hora,
-      nombre: pago?.metadata?.nombre,
-      telefono: pago?.metadata?.telefono,
-      monto: pago?.transaction_amount
-    });
-  } catch (e) {
-    console.error("Error creando reserva tras pago aprobado:", e);
-  }
-}
 
-      // 5) Actualizar en la BD (levanta hold y marca estado real)
+      // 5) Si el pago fue aprobado, crear la reserva real (FIX: usar la cancha de metadata)
+      if (status === 'approved') {
+        try {
+          await dao.insertarReservaManual({
+            complex_id: complejoId,
+            cancha: pago?.metadata?.cancha,                                      // <-- FIX acá
+            fechaISO: pago?.metadata?.fecha || pago?.metadata?.fechaISO,
+            hora: pago?.metadata?.hora,
+            nombre: pago?.metadata?.nombre,
+            telefono: pago?.metadata?.telefono,
+            monto: pago?.transaction_amount
+          });
+        } catch (e) {
+          console.error("Error creando reserva tras pago aprobado:", e);
+        }
+      }
+
+      // 6) Actualizar en la BD el estado final (levanta hold y marca estado real)
       try {
         await dao.actualizarReservaTrasPago({
           preference_id: prefId,
@@ -1008,7 +1008,7 @@ if (status === 'approved') {
         console.error("[webhook-mp] DB actualizarReservaTrasPago:", e?.message || e);
       }
 
-      // 6) (Compat) mantener espejo en archivo local si todavía lo usás
+      // 7) (Compat) espejo en archivo local si todavía lo usás
       try {
         if (typeof leerJSON === 'function' && typeof escribirJSON === 'function' && clave) {
           const reservas = leerJSON(pathReservas) || {};
@@ -1017,12 +1017,13 @@ if (status === 'approved') {
           r.payment_id    = pago?.id || r.payment_id;
 
           if (status === "approved") {
-            r.status   = "approved";
-            r.paidAt   = Date.now();
-            r.nombre   = r.nombre   || pago?.metadata?.nombre   || "";
-            r.telefono = r.telefono || pago?.metadata?.telefono || "";
+            r.status     = "approved";
+            r.paidAt     = Date.now();
+            r.nombre     = r.nombre   || pago?.metadata?.nombre   || "";
+            r.telefono   = r.telefono || pago?.metadata?.telefono || "";
             r.complejoId = r.complejoId || complejoId || "";
             delete r.holdUntil;
+
             await notificarAprobado?.({
               clave,
               complejoId: r.complejoId,
@@ -1037,6 +1038,7 @@ if (status === 'approved') {
           } else {
             r.status = "pending"; // in_process / pending
           }
+
           escribirJSON(pathReservas, { ...reservas, [clave]: r });
         }
       } catch (e) {
@@ -1213,8 +1215,36 @@ app.get('/complejos/:id/mp/credenciales', async (req, res) => {
     res.status(500).json({ ok: false, error: 'server_error' });
   }
 });
+// === Admin: bloquear / desbloquear un turno puntual ===
+app.post("/admin/bloquear", async (req, res) => {
+  try {
+    const { complejoId, cancha, fechaISO, fecha, hora, motivo } = req.body || {};
+    const fISO = fechaISO || fecha;
+    if (!complejoId || !cancha || !fISO || !hora) {
+      return res.status(400).json({ ok:false, error: "Faltan datos (complejoId/cancha/fechaISO/hora)" });
+    }
+    const r = await dao.bloquearTurno({ complex_id: complejoId, cancha, fechaISO: fISO, hora, motivo });
+    return res.json({ ok: true, ...r });
+  } catch (e) {
+    console.error("admin/bloquear:", e);
+    res.status(500).json({ ok:false, error:"Error al bloquear turno" });
+  }
+});
 
-
+app.post("/admin/desbloquear", async (req, res) => {
+  try {
+    const { complejoId, cancha, fechaISO, fecha, hora } = req.body || {};
+    const fISO = fechaISO || fecha;
+    if (!complejoId || !cancha || !fISO || !hora) {
+      return res.status(400).json({ ok:false, error: "Faltan datos (complejoId/cancha/fechaISO/hora)" });
+    }
+    const r = await dao.desbloquearTurno({ complex_id: complejoId, cancha, fechaISO: fISO, hora });
+    return res.json({ ok: true, ...r });
+  } catch (e) {
+    console.error("admin/desbloquear:", e);
+    res.status(500).json({ ok:false, error:"Error al desbloquear turno" });
+  }
+});
 // =======================
 // Health checks y datos panel
 // =======================
@@ -1230,12 +1260,12 @@ app.get("/__health_db", async (_req, res) => {
 app.get('/datos_complejos', async (_req, res) => {
   try {
     const data = await dao.listarComplejos();
-    res.json({ ok: true, data });
+    res.json(data); // <-- directo, sin {ok:true,data}
   } catch (e) {
-    console.error('Error en /datos_complejos:', e);
-    res.status(500).json({ ok: false, error: String(e.message || e) });
+    res.status(500).json({});
   }
 });
+
 
 
 // Endpoint de prueba (GET para abrirlo en el navegador)
