@@ -554,7 +554,58 @@ async function desbloquearTurno({ complex_id, cancha, fechaISO, hora }) {
 
   return { ok: rowCount > 0 };
 }
+/* ===================== BLOQUEOS DE TURNOS ===================== */
+// Crea/actualiza un turno bloqueado para un horario puntual
+async function bloquearTurno({ complex_id, cancha, fechaISO, hora, motivo }) {
+  const fieldQ = `
+    select id from fields
+    where complex_id=$1 and (
+      unaccent(lower(regexp_replace(name,'\\s+','','g'))) = unaccent(lower(regexp_replace($2,'\\s+','','g')))
+      or ($2 ~ '^[0-9]+$' and jugadores = ($2)::int)
+    )
+    limit 1
+  `;
+  const f = await pool.query(fieldQ, [complex_id, cancha]);
+  if (!f.rowCount) throw new Error("Cancha no encontrada");
+  const field_id = f.rows[0].id;
 
+  // Upsert por columnas — NO pisa otros horarios
+  await pool.query(`
+    insert into reservations (complex_id, field_id, fecha, hora, status, nombre, telefono, monto, hold_until)
+    values ($1,$2,$3,$4,'blocked',$5,$6,$7,null)
+    on conflict (complex_id, field_id, fecha, hora)
+    do update set
+      status = 'blocked',
+      nombre = excluded.nombre,
+      telefono = excluded.telefono,
+      monto = excluded.monto,
+      hold_until = null
+  `, [complex_id, field_id, fechaISO, hora, (motivo || 'Bloqueado'), null, null]);
+
+  return { ok: true };
+}
+
+// Borra sólo ese bloqueo puntual (no toca otros)
+async function desbloquearTurno({ complex_id, cancha, fechaISO, hora }) {
+  const fieldQ = `
+    select id from fields
+    where complex_id=$1 and (
+      unaccent(lower(regexp_replace(name,'\\s+','','g'))) = unaccent(lower(regexp_replace($2,'\\s+','','g')))
+      or ($2 ~ '^[0-9]+$' and jugadores = ($2)::int)
+    )
+    limit 1
+  `;
+  const f = await pool.query(fieldQ, [complex_id, cancha]);
+  if (!f.rowCount) throw new Error("Cancha no encontrada");
+  const field_id = f.rows[0].id;
+
+  await pool.query(`
+    delete from reservations
+    where complex_id=$1 and field_id=$2 and fecha=$3 and hora=$4 and status='blocked'
+  `, [complex_id, field_id, fechaISO, hora]);
+
+  return { ok: true };
+}
 /* ===================== EXPORTS ===================== */
 
 module.exports = {
