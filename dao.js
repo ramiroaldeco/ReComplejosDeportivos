@@ -502,6 +502,58 @@ async function insertarReservaManual({ complex_id, cancha, fechaISO, hora, nombr
 
   return { ok: true };
 }
+// === Bloqueo puntual por turno ===
+async function bloquearTurno({ complex_id, cancha, fechaISO, hora, motivo }) {
+  const fieldQ = `
+    select id from fields
+    where complex_id=$1 and (
+      unaccent(lower(regexp_replace(name,'\\s+','','g'))) = unaccent(lower(regexp_replace($2,'\\s+','','g')))
+      or ($2 ~ '^[0-9]+$' and jugadores = ($2)::int)
+    )
+    limit 1
+  `;
+  const f = await pool.query(fieldQ, [complex_id, cancha]);
+  if (!f.rowCount) throw new Error("Cancha no encontrada");
+  const field_id = f.rows[0].id;
+
+  await pool.query(`
+    insert into reservations (complex_id, field_id, fecha, hora, status, nombre, telefono, monto, preference_id, payment_id, hold_until)
+    values ($1,$2,$3,$4,'blocked',null,null,null,null,null,null)
+    on conflict (complex_id, field_id, fecha, hora)
+    do update set
+      status='blocked',
+      nombre=null,
+      telefono=null,
+      monto=null,
+      preference_id=null,
+      payment_id=null,
+      hold_until=null
+  `, [complex_id, field_id, fechaISO, hora]);
+
+  return { ok: true };
+}
+
+async function desbloquearTurno({ complex_id, cancha, fechaISO, hora }) {
+  const fieldQ = `
+    select id from fields
+    where complex_id=$1 and (
+      unaccent(lower(regexp_replace(name,'\\s+','','g'))) = unaccent(lower(regexp_replace($2,'\\s+','','g')))
+      or ($2 ~ '^[0-9]+$' and jugadores = ($2)::int)
+    )
+    limit 1
+  `;
+  const f = await pool.query(fieldQ, [complex_id, cancha]);
+  if (!f.rowCount) throw new Error("Cancha no encontrada");
+  const field_id = f.rows[0].id;
+
+  // Sólo borro si está bloqueado; no toco reservas pagadas o manuales
+  const { rowCount } = await pool.query(`
+    delete from reservations
+     where complex_id=$1 and field_id=$2 and fecha=$3 and hora=$4 and status='blocked'
+  `, [complex_id, field_id, fechaISO, hora]);
+
+  return { ok: rowCount > 0 };
+}
 
 /* ===================== EXPORTS ===================== */
 
@@ -520,6 +572,8 @@ module.exports = {
   actualizarReservaTrasPago,
   insertarReservaManual,
   reservarManualDB: insertarReservaManual, // alias
+  bloquearTurno,
+  desbloquearTurno,
 
   // === MP OAuth ===
   upsertMpOAuth,
