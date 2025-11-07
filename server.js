@@ -27,7 +27,7 @@ console.log("DAO sanity:", {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json()); // para parsear JSON
+app.use(express.json());                       // para parsear JSON
 app.use(express.urlencoded({ extended: true })); // para parsear formularios (x-www-form-urlencoded)
 
 // =======================
@@ -49,12 +49,19 @@ const ALLOWED_ORIGINS = [
   "http://127.0.0.1:5500",
 ];
 
+// ayuda para caches intermedios/CDN
+app.use((req, res, next) => {
+  res.setHeader("Vary", "Origin");
+  next();
+});
+
 app.use(
   cors({
     origin: (origin, cb) => {
       // Permitir same-origin/SSR y herramientas sin origin (curl/Postman/health)
       if (!origin) return cb(null, true);
       if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+      console.warn("CORS bloqueado para:", origin);
       return cb(new Error("CORS: Origin no permitido -> " + origin));
     },
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
@@ -65,7 +72,6 @@ app.use(
 
 // Responder preflight siempre
 app.options(/.*/, cors());
-
 
 // =======================
 // Rutas base y salud
@@ -285,7 +291,6 @@ async function refreshTokenMP(complejoId) {
 
   return newCreds.access_token;
 }
-
 // =======================
 // HOLD anti doble-reserva (legacy archivo de compat + limpieza)
 // =======================
