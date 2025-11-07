@@ -1273,25 +1273,22 @@ app.get("/__health_db", async (_req, res) => {
 app.get('/datos_complejos', async (_req, res) => {
   try {
     const data = await dao.listarComplejos();
-    const limpio = Object.fromEntries(
-      Object.entries(data || {}).filter(([, v]) => v && typeof v === 'object')
-    );
-    _cacheComplejosCompat = limpio;
-    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
-    res.json(limpio);
+    // si la DB responde pero está vacía, no caigas al JSON
+    if (!data || Object.keys(data).length === 0) {
+      return res.json({});
+    }
+    res.json(data);
   } catch (e) {
-    console.error('GET /datos_complejos DB error, fallback a archivo:', e?.message || e);
+    console.error('DB /datos_complejos error, fallback a archivo:', e?.message || e);
     try {
       const backup = JSON.parse(fs.readFileSync(path.join(__dirname, 'datos_complejos.json'), 'utf8'));
-      const limpio = Object.fromEntries(
-        Object.entries(backup || {}).filter(([, v]) => v && typeof v === 'object')
-      );
-      res.json(limpio);
+      res.json(backup || {});
     } catch {
       res.json({});
     }
   }
 });
+
 // Endpoint de prueba (GET para abrirlo en el navegador)
 app.get("/__test-email", async (req, res) => {
   try {
