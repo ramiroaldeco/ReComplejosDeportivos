@@ -64,7 +64,8 @@ app.use(
 );
 
 // Responder preflight siempre
-app.options("*", cors());
+app.options(/.*/, cors());
+
 
 // =======================
 // Rutas base y salud
