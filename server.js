@@ -2,12 +2,11 @@
 // Bootstrap & Imports
 // =======================
 require("dotenv").config();
-
 const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
-const fetch = require("node-fetch"); // v2
+const fetch = require("node-fetch");
 const { MercadoPagoConfig, Preference } = require("mercadopago");
 const nodemailer = require("nodemailer");
 
@@ -49,6 +48,13 @@ const ALLOWED_ORIGINS = [
   'http://localhost:5500',
   'http://127.0.0.1:5500'
 ];
+
+// =======================
+// Rutas base y salud
+// =======================
+app.get("/", (req, res) => {
+  res.type("text").send("OK ReComplejos backend");
+});
 
 app.use(cors({
   origin: (origin, cb) => {
@@ -467,15 +473,15 @@ let _cacheComplejosCompat = {};
 // Guardar datos mergeados (onboarding)
 app.post("/guardarDatos", async (req, res) => {
   try {
-    const nuevos = req.body || {};
-    await dao.guardarDatosComplejos(nuevos);
-    const actuales = leerJSON(pathDatos);
-    const merged = { ...actuales, ...nuevos };
-    escribirJSON(pathDatos, merged);
+    const nuevo = req.body;
+    if (!nuevo || !nuevo.nombre) {
+      return res.status(400).json({ error: "Datos inválidos" });
+    }
+    await dao.guardarComplejo(nuevo);
     res.json({ ok: true });
-  } catch (e) {
-    console.error("DB /guardarDatos", e);
-    res.status(500).json({ error: "DB error al guardar" });
+  } catch (err) {
+    console.error("Error guardando complejo:", err);
+    res.status(500).json({ error: "Error guardando en DB" });
   }
 });
 
@@ -1270,22 +1276,13 @@ app.get("/__health_db", async (_req, res) => {
 });
 
 // ===== Datos de complejos (para inicio, login, etc.) =====
-app.get('/datos_complejos', async (_req, res) => {
+app.get("/datos_complejos", async (req, res) => {
   try {
-    const data = await dao.listarComplejos();
-    // si la DB responde pero está vacía, no caigas al JSON
-    if (!data || Object.keys(data).length === 0) {
-      return res.json({});
-    }
-    res.json(data);
-  } catch (e) {
-    console.error('DB /datos_complejos error, fallback a archivo:', e?.message || e);
-    try {
-      const backup = JSON.parse(fs.readFileSync(path.join(__dirname, 'datos_complejos.json'), 'utf8'));
-      res.json(backup || {});
-    } catch {
-      res.json({});
-    }
+    const complejos = await dao.listarComplejos();
+    res.json(complejos);
+  } catch (err) {
+    console.error("Error listando complejos:", err);
+    res.status(500).json({ error: "Error leyendo DB" });
   }
 });
 
@@ -1361,5 +1358,5 @@ app.get("/reservas-obj", async (_req, res) => {
 // Arranque del servidor
 // =======================
 app.listen(PORT, () => {
-  console.log(`Server escuchando en http://0.0.0.0:${PORT}`);
+console.log("Servidor escuchando en puerto " + PORT);
 });
