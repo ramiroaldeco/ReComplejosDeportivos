@@ -48,40 +48,47 @@ function toStringOrNull(x) {
 
 /* ===================== COMPLEJOS ===================== */
 
-// Devuelve objeto { [id]: {nombre, ciudad, maps, servicios, imagenes, horarios, canchas} }
+// Devuelve objeto { [id]: {nombre, ciudad, lat, lng, maps, servicios, imagenes, horarios, canchas} }
 async function listarComplejos() {
-  const { rows: cx } = await pool.query(
-    `select id, name, city, maps_iframe, servicios, imagenes, clave_legacy
-       from complexes
-       order by name`
-  );
+  // === 1. Consultas a la base ===
+  const { rows: cx } = await pool.query(`
+    SELECT id, name, city, lat, lng, maps_iframe, servicios, imagenes, clave_legacy
+    FROM complexes
+    ORDER BY name
+  `);
 
-  const { rows: fields } = await pool.query(
-    `select id, complex_id, name, jugadores, precio_pp, senia
-       from fields
-       order by id`
-  );
-  const { rows: sched } = await pool.query(
-    `select complex_id, day_of_week, desde, hasta
-       from schedules
-       order by complex_id, day_of_week`
-  );
+  const { rows: fields } = await pool.query(`
+    SELECT id, complex_id, name, jugadores, precio_pp, senia
+    FROM fields
+    ORDER BY id
+  `);
 
+  const { rows: sched } = await pool.query(`
+    SELECT complex_id, day_of_week, desde, hasta
+    FROM schedules
+    ORDER BY complex_id, day_of_week
+  `);
+
+  // === 2. Armar estructura base por complejo ===
   const out = {};
   for (const c of cx) {
     out[c.id] = {
+      id: c.id,
       clave: c.clave_legacy || "",
       nombre: c.name,
       ciudad: c.city,
+      lat: c.lat != null ? Number(c.lat) : null,  // 👈 agregado
+      lng: c.lng != null ? Number(c.lng) : null,  // 👈 agregado
       maps: c.maps_iframe,
       // Si viniera como string/pg-array, seguimos mostrando arrays
       servicios: Array.isArray(c.servicios) ? c.servicios : toJsonArray(c.servicios),
-      imagenes:  Array.isArray(c.imagenes)  ? c.imagenes  : toJsonArray(c.imagenes),
+      imagenes: Array.isArray(c.imagenes) ? c.imagenes : toJsonArray(c.imagenes),
       canchas: [],
       horarios: {}
     };
   }
 
+  // === 3. Horarios por día ===
   const dowNames = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
   for (const s of sched) {
     const dia = dowNames[s.day_of_week] || "Lunes";
@@ -93,11 +100,13 @@ async function listarComplejos() {
     }
   }
 
+  // === 4. Cargar canchas ===
   for (const f of fields) {
     if (!out[f.complex_id]) continue;
     const jugadores = Number(f.jugadores || 0);
-    const precioPP  = Number(f.precio_pp  || 0);
-    const senia     = Number(f.senia      || 0);
+    const precioPP  = Number(f.precio_pp || 0);
+    const senia     = Number(f.senia || 0);
+
     out[f.complex_id].canchas.push({
       nombre: f.name,
       jugadores,
@@ -108,9 +117,9 @@ async function listarComplejos() {
     });
   }
 
+  // === 5. Devolver estructura final ===
   return out;
 }
-
 // ✅ Devuelve el complejo por ID (tolerante a mayúsculas/espacios)
 async function getComplejo(id) {
   const { rows } = await pool.query(
