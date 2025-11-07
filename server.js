@@ -63,7 +63,7 @@ app.use(cors({
 }));
 
 // Responder preflight siempre
-app.options('*', cors());
++ app.options('(.*)', cors());
 
 // =======================
 // >>> JWT ADD – middleware de auth (lo dejás listo por si lo usás)
