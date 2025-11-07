@@ -11,14 +11,14 @@ const { MercadoPagoConfig, Preference } = require("mercadopago");
 const nodemailer = require("nodemailer");
 
 // >>> JWT ADD
-const jwt = require('jsonwebtoken');
-const JWT_SECRET = process.env.JWT_SECRET || 'cambialo_en_.env';
+const jwt = require("jsonwebtoken");
+const JWT_SECRET = process.env.JWT_SECRET || "cambialo_en_.env";
 
 // 👉 Importá el DAO así, SIN destructurar:
 const dao = require("./dao");
 console.log("DAO sanity:", {
   listarComplejos: typeof dao.listarComplejos,
-  exportsKeys: Object.keys(dao)
+  exportsKeys: Object.keys(dao),
 });
 
 // =======================
@@ -27,7 +27,7 @@ console.log("DAO sanity:", {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json());                       // para parsear JSON
+app.use(express.json()); // para parsear JSON
 app.use(express.urlencoded({ extended: true })); // para parsear formularios (x-www-form-urlencoded)
 
 // =======================
@@ -36,78 +36,88 @@ app.use(express.urlencoded({ extended: true })); // para parsear formularios (x-
 // =======================
 const ALLOWED_ORIGINS = [
   // Producción (GitHub Pages)
-  'https://ramiroaldeco.github.io',
-  'https://ramiroaldeco.github.io/recomplejos-frontend',
+  "https://ramiroaldeco.github.io",
+  "https://ramiroaldeco.github.io/recomplejos-frontend",
 
   // Dev habituales (Vite/CRA)
-  'http://localhost:5173',
-  'http://localhost:3000',
-  'http://127.0.0.1:3000',
+  "http://localhost:5173",
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
 
   // Tus puertos previos (no los perdemos)
-  'http://localhost:5500',
-  'http://127.0.0.1:5500'
+  "http://localhost:5500",
+  "http://127.0.0.1:5500",
 ];
+
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      // Permitir same-origin/SSR y herramientas sin origin (curl/Postman/health)
+      if (!origin) return cb(null, true);
+      if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+      return cb(new Error("CORS: Origin no permitido -> " + origin));
+    },
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: false,
+  })
+);
+
+// Responder preflight siempre
+app.options("*", cors());
 
 // =======================
 // Rutas base y salud
+// (van DESPUÉS de CORS)
 // =======================
 app.get("/", (req, res) => {
   res.type("text").send("OK ReComplejos backend");
 });
 
-app.use(cors({
-  origin: (origin, cb) => {
-    // Permitir same-origin (fetches internos) y herramientas sin origin (curl/Postman/Render health)
-    if (!origin) return cb(null, true);
-    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-    return cb(new Error('CORS: Origin no permitido -> ' + origin));
-  },
-  methods: ['GET','POST','PUT','DELETE','OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: false
-}));
-
-// Responder preflight siempre
-app.options(/.*/, cors());
+// Opcional: health explícito si lo usás desde el front
+app.get("/healthz", (req, res) => res.json({ ok: true }));
 
 // =======================
 // >>> JWT ADD – middleware de auth (lo dejás listo por si lo usás)
 // =======================
 function auth(req, res, next) {
-  const h = req.headers.authorization || '';
+  const h = req.headers.authorization || "";
   const m = h.match(/^Bearer (.+)$/);
-  if (!m) return res.status(401).json({ ok:false, error:'no_token' });
+  if (!m) return res.status(401).json({ ok: false, error: "no_token" });
   try {
     const payload = jwt.verify(m[1], JWT_SECRET);
     req.user = payload; // { sub:'dueno', complejo:'...' }
     next();
   } catch (e) {
-    return res.status(401).json({ ok:false, error:'bad_token' });
+    return res.status(401).json({ ok: false, error: "bad_token" });
   }
 }
 
 // =======================
 // Paths de respaldos JSON (compat)
 // =======================
-const pathDatos    = path.join(__dirname, "datos_complejos.json");
+const pathDatos = path.join(__dirname, "datos_complejos.json");
 const pathReservas = path.join(__dirname, "reservas.json");
-const pathCreds    = path.join(__dirname, "credenciales_mp.json");
-const pathIdx      = path.join(__dirname, "prefidx.json");
+const pathCreds = path.join(__dirname, "credenciales_mp.json");
+const pathIdx = path.join(__dirname, "prefidx.json");
 
 // --- Helpers de archivo JSON
 function leerJSON(p) {
-  try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return {}; }
+  try {
+    return JSON.parse(fs.readFileSync(p, "utf8"));
+  } catch {
+    return {};
+  }
 }
 function escribirJSON(p, obj) {
   fs.writeFileSync(p, JSON.stringify(obj, null, 2));
 }
 
 // asegurar archivos de backup
-if (!fs.existsSync(pathDatos))    escribirJSON(pathDatos, {});
+if (!fs.existsSync(pathDatos)) escribirJSON(pathDatos, {});
 if (!fs.existsSync(pathReservas)) escribirJSON(pathReservas, {});
-if (!fs.existsSync(pathCreds))    escribirJSON(pathCreds, {});
-if (!fs.existsSync(pathIdx))      escribirJSON(pathIdx, {});
+if (!fs.existsSync(pathCreds)) escribirJSON(pathCreds, {});
+if (!fs.existsSync(pathIdx)) escribirJSON(pathIdx, {});
 
 // =======================
 // CONFIG MP por complejo (SOLO OAuth)
