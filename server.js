@@ -1275,16 +1275,24 @@ app.get("/__health_db", async (_req, res) => {
   }
 });
 
-// ===== Datos de complejos (para inicio, login, etc.) =====
+// Salud simple para comprobar que corre
+app.get("/", (req, res) => {
+  res.type("text").send("OK ReComplejos backend");
+});
+
+// Lista de complejos: SIEMPRE desde Neon (sin leer JSON local)
 app.get("/datos_complejos", async (req, res) => {
   try {
-    const complejos = await dao.listarComplejos();
-    res.json(complejos);
-  } catch (err) {
-    console.error("Error listando complejos:", err);
-    res.status(500).json({ error: "Error leyendo DB" });
+    const lista = await dao.listarComplejos(); // -> debe leer de tu Neon
+    // Podés normalizar si querés:
+    // const out = lista.map(r => ({ id: r.id, name: r.name, city: r.city }));
+    res.json(lista);
+  } catch (e) {
+    console.error("Error /datos_complejos:", e);
+    res.status(500).json({ error: "DB error" });
   }
 });
+
 
 // Endpoint de prueba (GET para abrirlo en el navegador)
 app.get("/__test-email", async (req, res) => {
