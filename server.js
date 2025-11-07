@@ -63,7 +63,7 @@ app.use(cors({
 }));
 
 // Responder preflight siempre
-+ app.options('(.*)', cors());
+app.options(/.*/, cors());
 
 // =======================
 // >>> JWT ADD – middleware de auth (lo dejás listo por si lo usás)
@@ -369,7 +369,6 @@ function validarTurno({ complejoId, canchaNombre, fecha, hora }) {
 
   return { ok: true, cancha };
 }
-
 // =======================
 // Email helpers
 // =======================
@@ -767,7 +766,6 @@ app.post("/login", async (req, res) => {
   if (!ok) return res.status(401).json({ error: "Contraseña incorrecta" });
   res.json({ ok: true });
 });
-
 // =======================
 // (Opcional) healthcheck simple
 // =======================
@@ -819,44 +817,45 @@ app.post("/crear-preferencia", async (req, res) => {
     const info = await dao.getComplejo(complejoId);
     if (!info) return res.status(400).json({ error: "Complejo inexistente" });
 
-    // 5) Crear HOLD (bloqueo del turno
+    // 5) Crear HOLD (bloqueo del turno)
     //const holdOk = await dao.crearHold({
-      //complex_id: complejoId,
-      //cancha,                 // nombre visible; DB lo resuelve contra fields
-      //fechaISO: fISO,
-      //hora: hHM,
-      //nombre, telefono,
-      //monto,
-      //holdMinutes: Number(holdMinutes) || 10
+    //  complex_id: complejoId,
+    //  cancha,                 // nombre visible; DB lo resuelve contra fields
+    //  fechaISO: fISO,
+    //  hora: hHM,
+    //  nombre, telefono,
+    //  monto,
+    //  holdMinutes: Number(holdMinutes) || 10
     //});
     //if (!holdOk) return res.status(400).json({ error: "Cancha inexistente o turno inválido" });
 
-   // 6) Preferencia MP - busca token en mp_oauth o en complexes o en variable
-let accessToken = null;
+    // 6) Preferencia MP - busca token en mp_oauth o en complexes o en variable
+    let accessToken = null;
 
-// prioridad 1: tabla mp_oauth (tokens reales)
-try {
-  const creds = await dao.getMpOAuth(complejoId);
-  if (creds?.access_token) accessToken = creds.access_token;
-} catch (_) {}
+    // prioridad 1: tabla mp_oauth (tokens reales)
+    try {
+      const creds = await dao.getMpOAuth(complejoId);
+      if (creds?.access_token) accessToken = creds.access_token;
+    } catch (_) {}
 
-// prioridad 2: tabla complexes (por compatibilidad)
-if (!accessToken) {
-  try {
-    const creds2 = await dao.leerCredencialesMP(complejoId);
-    if (creds2?.mp_access_token) accessToken = creds2.mp_access_token;
-  } catch (_) {}
-}
+    // prioridad 2: tabla complexes (por compatibilidad)
+    if (!accessToken) {
+      try {
+        const creds2 = await dao.leerCredencialesMP(complejoId);
+        if (creds2?.mp_access_token) accessToken = creds2.mp_access_token;
+      } catch (_) {}
+    }
 
-// prioridad 3: variable de entorno
-if (!accessToken) accessToken = process.env.MP_ACCESS_TOKEN || null;
+    // prioridad 3: variable de entorno
+    if (!accessToken) accessToken = process.env.MP_ACCESS_TOKEN || null;
 
-// si no hay token => error claro
-if (!accessToken) {
-  return res.status(400).json({
-    error: `MercadoPago no configurado: no se encontró access_token para el complejo ${complejoId}`
-  });
-}
+    // si no hay token => error claro
+    if (!accessToken) {
+      return res.status(400).json({
+        error: `MercadoPago no configurado: no se encontró access_token para el complejo ${complejoId}`
+      });
+    }
+
     const prefBody = {
       items: [{ title: titulo || `Seña ${cancha}`, quantity: 1, currency_id: "ARS", unit_price: Number(monto) }],
       payer: { name: nombre || "Cliente", phone: { number: telefono || "" } },
@@ -993,21 +992,20 @@ app.post(
 
       // 5) Si el pago fue aprobado, crear la reserva real (FIX: usar la cancha de metadata)
       if (status === 'approved') {
-  try {
-    await dao.insertarReservaManual({
-      complex_id:  complejoId,
-      cancha:      pago?.metadata?.cancha,                  // ← importante
-      fechaISO:    pago?.metadata?.fecha || pago?.metadata?.fechaISO,
-      hora:        pago?.metadata?.hora,
-      nombre:      pago?.metadata?.nombre,
-      telefono:    pago?.metadata?.telefono,
-      monto:       pago?.transaction_amount
-    });
-  } catch (e) {
-    console.error("Error creando reserva tras pago aprobado:", e);
-  }
-}
-
+        try {
+          await dao.insertarReservaManual({
+            complex_id:  complejoId,
+            cancha:      pago?.metadata?.cancha,                  // ← importante
+            fechaISO:    pago?.metadata?.fecha || pago?.metadata?.fechaISO,
+            hora:        pago?.metadata?.hora,
+            nombre:      pago?.metadata?.nombre,
+            telefono:    pago?.metadata?.telefono,
+            monto:       pago?.transaction_amount
+          });
+        } catch (e) {
+          console.error("Error creando reserva tras pago aprobado:", e);
+        }
+      }
 
       // 6) Actualizar en la BD el estado final (levanta hold y marca estado real)
       try {
