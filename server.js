@@ -1,3 +1,6 @@
+// =======================
+// Bootstrap & Imports
+// =======================
 require("dotenv").config();
 
 const express = require("express");
@@ -19,44 +22,52 @@ console.log("DAO sanity:", {
   exportsKeys: Object.keys(dao)
 });
 
-// --- App & middlewares
+// =======================
+// App & Middlewares base
+// =======================
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json());
-
-// === Middlewares base ===
 app.use(express.json());                       // para parsear JSON
 app.use(express.urlencoded({ extended: true })); // para parsear formularios (x-www-form-urlencoded)
 
-
-// --- CORS (permitimos GH Pages y localhost) ---
+// =======================
+// CORS sólido (GH Pages + local) — ÚNICO lugar
+// Debe ir ANTES de cualquier ruta
+// =======================
 const ALLOWED_ORIGINS = [
+  // Producción (GitHub Pages)
   'https://ramiroaldeco.github.io',
   'https://ramiroaldeco.github.io/recomplejos-frontend',
+
+  // Dev habituales (Vite/CRA)
+  'http://localhost:5173',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+
+  // Tus puertos previos (no los perdemos)
   'http://localhost:5500',
   'http://127.0.0.1:5500'
 ];
 
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  if (ALLOWED_ORIGINS.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-  }
-  // Para caches intermedios/CDN
-  res.setHeader('Vary', 'Origin');
+app.use(cors({
+  origin: (origin, cb) => {
+    // Permitir same-origin (fetches internos) y herramientas sin origin (curl/Postman/Render health)
+    if (!origin) return cb(null, true);
+    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    return cb(new Error('CORS: Origin no permitido -> ' + origin));
+  },
+  methods: ['GET','POST','PUT','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: false
+}));
 
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+// Responder preflight siempre
+app.options('*', cors());
 
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(204); // preflight OK
-  }
-  next();
-});
-
-
-// >>> JWT ADD – middleware de auth
+// =======================
+// >>> JWT ADD – middleware de auth (lo dejás listo por si lo usás)
+// =======================
 function auth(req, res, next) {
   const h = req.headers.authorization || '';
   const m = h.match(/^Bearer (.+)$/);
@@ -70,7 +81,9 @@ function auth(req, res, next) {
   }
 }
 
-// --- Paths de respaldos JSON (compat)
+// =======================
+// Paths de respaldos JSON (compat)
+// =======================
 const pathDatos    = path.join(__dirname, "datos_complejos.json");
 const pathReservas = path.join(__dirname, "reservas.json");
 const pathCreds    = path.join(__dirname, "credenciales_mp.json");
@@ -496,7 +509,6 @@ app.get("/reservas", async (req, res) => {
   }
 });
 
-
 // Guardar reservas masivo (panel dueño)
 app.post("/guardarReservas", async (req, res) => {
   try {
@@ -564,7 +576,6 @@ app.get("/estado-reserva", async (req, res) => {
 // =======================
 // NUEVA RUTA: Reservar manual (recomendada)
 // =======================
-
 /**
  * Crea o actualiza una reserva manual para un turno concreto.
  * Guarda en la base de datos y notifica al dueño si corresponde.
@@ -728,7 +739,6 @@ app.post("/notificar-manual", async (req, res) => {
 // =======================
 // LOGIN
 // =======================
-
 app.post("/login", async (req, res) => {
   const id = String(req.body?.complejo || "").trim();
   const pass = String(req.body?.password || "").trim();
@@ -759,9 +769,12 @@ app.post("/login", async (req, res) => {
 });
 
 // =======================
+// (Opcional) healthcheck simple
+// =======================
+app.get("/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
+// =======================
 // PAGOS: crear preferencia (SOLO OAuth)
 // =======================
-
 // =======================
 // Crear preferencia (Mercado Pago) + HOLD
 // =======================
@@ -980,20 +993,21 @@ app.post(
 
       // 5) Si el pago fue aprobado, crear la reserva real (FIX: usar la cancha de metadata)
       if (status === 'approved') {
-        try {
-          await dao.insertarReservaManual({
-            complex_id: complejoId,
-            cancha: pago?.metadata?.cancha,                                      // <-- FIX acá
-            fechaISO: pago?.metadata?.fecha || pago?.metadata?.fechaISO,
-            hora: pago?.metadata?.hora,
-            nombre: pago?.metadata?.nombre,
-            telefono: pago?.metadata?.telefono,
-            monto: pago?.transaction_amount
-          });
-        } catch (e) {
-          console.error("Error creando reserva tras pago aprobado:", e);
-        }
-      }
+  try {
+    await dao.insertarReservaManual({
+      complex_id:  complejoId,
+      cancha:      pago?.metadata?.cancha,                  // ← importante
+      fechaISO:    pago?.metadata?.fecha || pago?.metadata?.fechaISO,
+      hora:        pago?.metadata?.hora,
+      nombre:      pago?.metadata?.nombre,
+      telefono:    pago?.metadata?.telefono,
+      monto:       pago?.transaction_amount
+    });
+  } catch (e) {
+    console.error("Error creando reserva tras pago aprobado:", e);
+  }
+}
+
 
       // 6) Actualizar en la BD el estado final (levanta hold y marca estado real)
       try {
@@ -1257,16 +1271,22 @@ app.get("/__health_db", async (_req, res) => {
   }
 });
 
+// ===== Datos de complejos (para inicio, login, etc.) =====
 app.get('/datos_complejos', async (_req, res) => {
   try {
-    const data = await dao.listarComplejos();
-    res.json(data); // <-- directo, sin {ok:true,data}
+    const data = await dao.listarComplejos();   // { elbosque: {...}, lamasia: {...} }
+    res.json(data || {});
   } catch (e) {
-    res.status(500).json({});
+    console.error('GET /datos_complejos DB error, fallback a archivo:', e?.message || e);
+    try {
+      // fallback a archivo local si lo tenés
+      const backup = JSON.parse(fs.readFileSync(path.join(__dirname, 'datos_complejos.json'), 'utf8'));
+      res.json(backup || {});
+    } catch {
+      res.json({});
+    }
   }
 });
-
-
 
 // Endpoint de prueba (GET para abrirlo en el navegador)
 app.get("/__test-email", async (req, res) => {
@@ -1297,6 +1317,7 @@ app.get("/__test-email", async (req, res) => {
 // Listar reservas (DB → objeto para micomplejo.html)
 // (Unificado: quitamos el duplicado de /reservas-obj)
 // =======================
+// ===== Listar reservas → objeto para el panel =====
 app.get("/reservas-obj", async (_req, res) => {
   try {
     const q = `
@@ -1335,8 +1356,6 @@ app.get("/reservas-obj", async (_req, res) => {
     res.status(500).json({});
   }
 });
-
-
 // =======================
 // Arranque del servidor
 // =======================
