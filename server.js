@@ -55,23 +55,30 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      // Permitir same-origin/SSR y herramientas sin origin (curl/Postman/health)
-      if (!origin) return cb(null, true);
-      if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-      console.warn("CORS bloqueado para:", origin);
-      return cb(new Error("CORS: Origin no permitido -> " + origin));
-    },
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-    credentials: false,
-  })
-);
+// Configuración centralizada de CORS
+const corsOptions = {
+  origin: (origin, cb) => {
+    // Permitir same-origin/SSR y herramientas sin origen (curl/Postman/health).
+    // Cuando el origen viene como literal 'null' (p.ej. file://), también lo aceptamos.
+    if (!origin || origin === "null") {
+      return cb(null, true);
+    }
+    if (ALLOWED_ORIGINS.includes(origin)) {
+      return cb(null, true);
+    }
+    console.warn("CORS bloqueado para:", origin);
+    return cb(new Error("CORS: Origin no permitido -> " + origin));
+  },
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  credentials: false,
+};
 
-// Responder preflight siempre
-app.options(/.*/, cors());
+// Responder preflight siempre con la misma configuración
+app.options("*", cors(corsOptions));
+
+// Aplicar CORS a todas las rutas
+app.use(cors(corsOptions));
 
 // =======================
 // Rutas base y salud
@@ -83,6 +90,75 @@ app.get("/", (req, res) => {
 
 // Opcional: health explícito si lo usás desde el front
 app.get("/healthz", (req, res) => res.json({ ok: true }));
+// =======================
+// Datos de complejos (SIEMPRE como mapa { id: {...} })
+// =======================
+app.get("/datos_complejos", async (req, res) => {
+  try {
+    const datos = await dao.listarComplejos(); // puede venir array o mapa
+
+    // Normalizo a MAPA { id: {...} } y limpio nulos
+    let mapa = {};
+    if (Array.isArray(datos)) {
+      datos.filter(Boolean).forEach((c, i) => {
+        const id = (c && c.id) || String(i);
+        mapa[id] = { ...c, id };
+      });
+    } else if (datos && typeof datos === "object") {
+      for (const [k, v] of Object.entries(datos)) {
+        if (v && typeof v === "object") {
+          mapa[k] = { ...v, id: v.id || k };
+        }
+      }
+    }
+
+    return res.json(mapa);
+  } catch (e) {
+    console.error("GET /datos_complejos DB error:", e?.message || e);
+    // Fallback suave a archivo local si existiera
+    try {
+      const p = path.join(__dirname, "datos_complejos.json");
+      const raw = fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "{}";
+      const obj = JSON.parse(raw || "{}");
+      return res.json(obj || {});
+    } catch (_) {
+      return res.json({});
+    }
+  }
+});
+
+
+// =======================
+// Guardar mapa completo de complejos { id: {...} }
+// (Usa dao.guardarDatosComplejos)
+// =======================
+app.post("/guardarDatos", async (req, res) => {
+  try {
+    const body = req.body;
+
+    // Debe ser un objeto (mapa) — NO array
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "payload_debe_ser_mapa_por_id" });
+    }
+
+    // Normalizo IDs dentro de los valores
+    for (const [id, c] of Object.entries(body)) {
+      if (c && typeof c === "object") {
+        c.id = c.id || id;
+      } else {
+        delete body[id];
+      }
+    }
+
+    await dao.guardarDatosComplejos(body);
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error("POST /guardarDatos error:", e?.message || e);
+    return res.status(500).json({ ok: false, error: "guardarDatos_db" });
+  }
+});
 
 // =======================
 // >>> JWT ADD – middleware de auth (lo dejás listo por si lo usás)
@@ -99,7 +175,6 @@ function auth(req, res, next) {
     return res.status(401).json({ ok: false, error: "bad_token" });
   }
 }
-
 // =======================
 // Paths de respaldos JSON (compat)
 // =======================
@@ -485,22 +560,6 @@ async function notificarAprobado({ clave, complejoId, nombre, telefono, monto })
 
 // Cache breve para validación
 let _cacheComplejosCompat = {};
-
-// Guardar datos mergeados (onboarding)
-app.post("/guardarDatos", async (req, res) => {
-  try {
-    const nuevo = req.body;
-    if (!nuevo || !nuevo.nombre) {
-      return res.status(400).json({ error: "Datos inválidos" });
-    }
-    await dao.guardarComplejo(nuevo);
-    res.json({ ok: true });
-  } catch (err) {
-    console.error("Error guardando complejo:", err);
-    res.status(500).json({ error: "Error guardando en DB" });
-  }
-});
-
 // Alta/actualización credencial "legacy"
 app.post("/alta-credencial", (req, res) => {
   const { id, mp_access_token, access_token } = req.body || {};
@@ -1295,21 +1354,6 @@ app.get("/__health_db", async (_req, res) => {
 app.get("/", (req, res) => {
   res.type("text").send("OK ReComplejos backend");
 });
-
-// Lista de complejos: SIEMPRE desde Neon (sin leer JSON local)
-app.get("/datos_complejos", async (req, res) => {
-  try {
-    const lista = await dao.listarComplejos(); // -> debe leer de tu Neon
-    // Podés normalizar si querés:
-    // const out = lista.map(r => ({ id: r.id, name: r.name, city: r.city }));
-    res.json(lista);
-  } catch (e) {
-    console.error("Error /datos_complejos:", e);
-    res.status(500).json({ error: "DB error" });
-  }
-});
-
-
 // Endpoint de prueba (GET para abrirlo en el navegador)
 app.get("/__test-email", async (req, res) => {
   try {
