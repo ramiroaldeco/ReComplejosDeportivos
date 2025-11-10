@@ -591,7 +591,7 @@ app.get("/reservas", async (req, res) => {
 
 // Guardar reservas masivo (panel dueño)
 app.post("/guardarReservas", async (req, res) => {
-  try {
+  ��try {
     await dao.guardarReservasObjCompat(req.body || {});
     escribirJSON(pathReservas, req.body || {});
     res.json({ ok: true });
